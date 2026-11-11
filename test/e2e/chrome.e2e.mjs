@@ -28,7 +28,9 @@ const server = createServer(async (req, res) => {
   }
   res.writeHead(200, { 'Content-Type': 'text/html' });
   res.end(url.pathname === '/plain' ? '<!doctype html><title>Plain</title><h1>Not Dynamics</h1>'
-    : '<!doctype html><title>Mock org</title><h1>Mock Dynamics 365</h1><input value="secret"><script src="/mock/xrm.js"></script>');
+    : '<!doctype html><title>Mock org</title><h1>Mock Dynamics 365</h1><label id="id-1-name-field-label">Account Name</label><input value="secret"><script src="/mock/xrm.js"></script>'
+      + '<script>__mock.effectiveUser = () => __mock.realFetch("/api/data/v9.2/headers").then((r) => r.json())'
+      + '.then((h) => (__mock.USERS.find((u) => u.azureactivedirectoryobjectid === h.callerobjectid) || {}).systemuserid);</script>');
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const origin = `http://localhost:${server.address().port}`;
@@ -89,9 +91,35 @@ try {
   step('popup connects to the page and lists 52 enabled commands');
   await popup.close();
 
+  // Out of the box the menu stays open after a command and reports in place.
+  popup = await runFromPalette('logical names');
+  await popup.waitForSelector('#toast.ok:not([hidden])');
+  assert.match(await popup.$eval('#toast', (e) => e.textContent), /Logical names shown on \d+ fields/);
+  assert.equal(await page.$eval('label', (l) => getComputedStyle(l, '::after').content), '"name"');
+  assert.equal(popup.isClosed(), false);
+  step('the menu stays open by default, and logical names appear as chips');
+
+  // Shift+Enter does the opposite once.
+  await popup.$eval('.search input', (i) => { i.value = ''; });
+  await popup.type('.search input', 'logical names');
+  await popup.keyboard.down('Shift');
+  await popup.keyboard.press('Enter');
+  await popup.keyboard.up('Shift');
+  await closed(popup);
+  assert.equal(await page.$eval('label', (l) => getComputedStyle(l, '::after').content), 'none');
+  step('Shift+Enter closes the menu for one command');
+
+  // The settings panel switches to "close after a command" for the rest of the run.
+  popup = await openPopup();
+  await popup.click('#settings');
+  await popup.click('.seg [data-value="false"]');
+  assert.equal((await worker.evaluate('chrome.storage.local.get("keepOpen")')).keepOpen, false);
+  await popup.close();
+  step('the settings panel stores the close-after-command choice');
+
   await closed(await runFromPalette('god mode'));
   assert.equal(await page.evaluate(() => Xrm.Page.ui.controls.get('creditlimit').getVisible()), true);
-  assert.match(await shadow((s) => s.querySelector('.toast').textContent), /God mode on: \d+ restrictions lifted/);
+  assert.match(await shadow((s) => [...s.querySelectorAll('.toast')].at(-1).textContent), /God mode on: \d+ restrictions lifted/);
   step('god mode runs in the page and the popup closes');
 
   await closed(await runFromPalette('all fields'));
@@ -105,7 +133,7 @@ try {
 
   await closed(await runFromPalette('blur'));
   assert.equal(await page.$eval('input', (i) => getComputedStyle(i).filter), 'blur(5px)');
-  step('blur applies a stylesheet');
+  step('blur hides the values on the page');
 
   popup = await runFromPalette('web api root');
   const apiTab = await browser.waitForTarget((t) => t.url() === `${origin}/api/data/v9.2/`);
@@ -139,17 +167,29 @@ try {
   assert.equal(rules.length, 1);
   assert.equal(rules[0].condition.urlFilter, `|${origin}/api/data/`);
   assert.equal((await headers()).callerobjectid, 'aad00002-aaaa-4bbb-8ccc-dddddddddddd');
-  assert.equal(await worker.evaluate('chrome.action.getBadgeText({})'), 'AS');
-  step('impersonation adds the CallerObjectId header and a badge');
+  // The badge shows on the tabs of that environment only.
+  const other = await browser.newPage();
+  await other.goto(`${origin.replace('localhost', '127.0.0.1')}/plain`);
+  const badges = () => worker.evaluate(`(async () => {
+    const tabs = await chrome.tabs.query({});
+    return Promise.all(tabs.map(async (t) => [t.url ? new URL(t.url).pathname : '', await chrome.action.getBadgeText({ tabId: t.id })]));
+  })()`);
+  await wait(300);
+  assert.deepEqual((await badges()).sort(), [['', ''], ['/main.aspx', 'AS']]);
+  await other.close();
+  step('impersonation adds the CallerObjectId header, and a badge on that tab only');
 
   popup = await openPopup();
   assert.equal(await popup.$eval('.banner span', (e) => e.textContent), 'Acting as Grace Hopper');
+  await popup.waitForSelector('.banner .check');
+  assert.equal(await popup.$eval('.banner .check', (e) => e.textContent), 'confirmed');
   const reloadedAgain = page.waitForNavigation();
   await popup.click('.banner button');
   await Promise.all([closed(popup), reloadedAgain]);
   assert.equal((await worker.evaluate('chrome.declarativeNetRequest.getSessionRules()')).length, 0);
   assert.equal((await headers()).callerobjectid, undefined);
-  assert.equal(await worker.evaluate('chrome.action.getBadgeText({})'), '');
+  await wait(300);
+  assert.deepEqual((await badges()).map((b) => b[1]), ['']);
   step('stopping impersonation removes the rule and the badge');
 
   const nav = page.waitForNavigation();

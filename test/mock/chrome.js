@@ -19,6 +19,8 @@
     setTimeout(() => window.location.reload(), 300);
   };
 
+  page.__mock.effectiveUser = () => impersonated && impersonated.id;
+
   window.chrome = {
     runtime: {
       id: 'mock',

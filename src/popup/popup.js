@@ -14,7 +14,8 @@ const byId = new Map(COMMANDS.map((c) => [c.id, c]));
 const state = {
   tab: null,
   ctx: null, // null while connecting
-  imp: { user: null, permitted: false },
+  imp: { user: null, permitted: false, check: null }, // check: what the server says about the impersonation
+  keepOpen: true, // stay open after a command runs
   favs: [],
   recents: [],
   theme: 'auto',
@@ -61,10 +62,10 @@ let toastTimer;
 function toast(message, kind = 'error') {
   const el = $('toast');
   el.className = `toast ${kind}`;
-  el.replaceChildren(icon(kind === 'error' ? 'triangle-alert' : 'star', 16), h('span', null, message));
+  el.replaceChildren(icon(kind === 'error' ? 'triangle-alert' : 'square-check', 16), h('span', null, message));
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 4500);
+  toastTimer = setTimeout(() => { el.hidden = true; }, kind === 'error' ? 4500 : 2600);
 }
 
 async function copyText(text) {
@@ -129,8 +130,11 @@ function renderHeader() {
 
   const banners = [];
   if (state.imp.user) {
-    banners.push(h('div', { class: 'banner' }, icon('drama', 16),
+    const { check } = state.imp;
+    const bad = check && check.state !== 'ok';
+    banners.push(h('div', { class: `banner${bad ? ' bad' : ''}`, title: check ? check.detail : null }, icon('drama', 16),
       h('span', null, 'Acting as ', h('b', null, state.imp.user.name)),
+      check && h('em', { class: 'check' }, check.label),
       h('button', { type: 'button', onclick: stopImpersonation }, 'Stop')));
   }
   if (ctx && ctx.flags) {
@@ -203,7 +207,7 @@ function renderList() {
         onclick: (e) => { e.stopPropagation(); toggleFav(cmd.id); } }, icon('star', 15));
       nodes.push(h('div', {
         class: `cmd${reason ? ' off' : ''}`, role: 'option', id: `cmd-${index}`, 'data-index': index, title: reason || null, 'aria-disabled': reason ? 'true' : null,
-        onclick: () => { state.selected = index; paintSelection(); execute(cmd); },
+        onclick: (e) => { state.selected = index; paintSelection(); execute(cmd, undefined, e.shiftKey); },
         onmousemove: () => { if (state.selected !== index) { state.selected = index; paintSelection(false); } },
       },
       h('div', { class: 'ico' }, icon(cmd.icon, 17)),
@@ -247,7 +251,17 @@ function toggleFav(id) {
 }
 
 // ── Running commands ──────────────────────────────────────────────────────
-async function execute(cmd, args) {
+// Re-read what the page shows: a command may have changed the record or the page.
+async function refreshContext() {
+  const ctx = await call('context').catch(() => null);
+  if (!ctx) return;
+  state.ctx = ctx;
+  renderHeader();
+  if (listEl && listEl.isConnected) renderList();
+}
+
+// `invert` (Shift held) does the opposite of the "keep open" setting, once.
+async function execute(cmd, args, invert) {
   const reason = reasonDisabled(cmd);
   if (reason) return toast(reason);
   if (cmd.view === 'impersonate') return showImpersonate();
@@ -260,10 +274,27 @@ async function execute(cmd, args) {
     const res = await call('run', cmd.id, args || {}, { theme: state.theme });
     if (!res) throw new Error('The page did not answer. Reload it and try again.');
     if (!res.ok) throw new Error(res.error);
+    // A page that reloads takes the palette's view of it along: always close then.
+    const keep = state.keepOpen !== !!invert && !res.navigate;
     if (res.copy) await copyText(res.copy);
-    if (res.open) await api.tabs.create({ url: res.open, index: state.tab.index + 1 });
-    if (res.toast) await call('notify', res.toast, res.kind || 'ok', state.theme);
-    window.close();
+    if (res.open) await api.tabs.create({ url: res.open, index: state.tab.index + 1, active: !keep });
+    if (!keep) {
+      if (res.toast) await call('notify', res.toast, res.kind || 'ok', state.theme);
+      window.close();
+      return true;
+    }
+    toast(res.toast || (res.open ? 'Opened in a background tab' : `${cmd.title}: done`), 'ok');
+    if (!listEl.isConnected) showList();
+    else {
+      renderList();
+      if (state.visible[state.selected] !== cmd) {
+        const index = state.visible.lastIndexOf(cmd); // the Recent group grew above: stay on the same command
+        if (index !== -1) state.selected = index;
+      }
+      paintSelection();
+    }
+    await refreshContext();
+    setTimeout(refreshContext, 900); // in-app navigation settles a little later
     return true;
   } catch (err) {
     toast(String((err && err.message) || err));
@@ -403,7 +434,8 @@ function showImpersonate() {
   };
   input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(search, 220); });
   $('view').replaceChildren(h('div', { class: 'pane' }, paneHead(cmd),
-    h('p', null, 'Pick a user and the app reloads with their security. You need the "Act on behalf of another user" privilege (System Administrators have it).'),
+    h('p', null, 'Pick a user and the app reloads. From then on the server reads and saves data as them: "Modified by" shows them, with you as the delegate.'
+      + ' The page header keeps your own name. You need the "Act on behalf of another user" privilege (System Administrators have it).'),
     h('div', { class: 'field' }, h('label', { for: 'f-user' }, 'User'), input),
     results));
   results.replaceChildren(h('div', { class: 'muted' }, 'Searching…'));
@@ -440,6 +472,54 @@ async function stopImpersonation() {
   renderHeader();
 }
 
+// Ask the server who it thinks we are, and say so next to the "Acting as" banner.
+async function checkImpersonation() {
+  const { user } = state.imp;
+  if (!user) return;
+  const who = await call('whoAmI').catch(() => null);
+  if (state.imp.user !== user) return;
+  if (!who || !who.ok) {
+    state.imp.check = { state: 'error', label: 'refused', detail: (who && who.error) || 'The server did not answer.' };
+  } else if (who.userId === user.id.toLowerCase()) {
+    state.imp.check = { state: 'ok', label: 'confirmed', detail: 'The server answers as this user.' };
+  } else {
+    state.imp.check = { state: 'off', label: 'not applied', detail: 'The server still answers as you. Stop, reload the page and try again.' };
+  }
+  renderHeader();
+}
+
+// ── Settings view ─────────────────────────────────────────────────────────
+function segmented(label, options, current, onPick) {
+  const group = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': label });
+  const paint = (value) => group.replaceChildren(...options.map(([id, text]) => h('button', {
+    type: 'button', role: 'radio', 'aria-checked': String(id === value), 'data-value': String(id),
+    onclick: () => { onPick(id); paint(id); },
+  }, text)));
+  paint(current);
+  return group;
+}
+
+function showSettings() {
+  const reset = h('button', { class: 'secondary', type: 'button', onclick: () => {
+    state.favs = [];
+    state.recents = [];
+    save({ favs: [], recents: [] });
+    toast('Favourites and recent commands cleared', 'ok');
+  } }, 'Clear favourites and recents');
+  $('view').replaceChildren(h('div', { class: 'pane settings' }, paneHead({ title: 'Settings' }),
+    h('div', { class: 'setting' },
+      h('div', null, h('b', null, 'After running a command'), h('small', null, 'Hold Shift while you click or press Enter to do the opposite once. Commands that reload the page always close the menu.')),
+      segmented('After running a command', [[true, 'Keep open'], [false, 'Close']], state.keepOpen, (value) => { state.keepOpen = value; save({ keepOpen: value }); })),
+    h('div', { class: 'setting' },
+      h('div', null, h('b', null, 'Theme'), h('small', null, 'Auto follows your system. Applies to this menu and to the panels shown in the page.')),
+      segmented('Theme', THEMES.map((t) => [t, t[0].toUpperCase() + t.slice(1)]), state.theme, (value) => { state.theme = value; save({ theme: value }); applyTheme(); })),
+    h('div', { class: 'setting' },
+      h('div', null, h('b', null, 'Keyboard shortcut'), h('small', null, 'Alt+Shift+L opens Level 67. Change it in your browser\'s extension shortcut settings.'))),
+    h('div', { class: 'setting' },
+      h('div', null, h('b', null, 'Your data'), h('small', null, 'Favourites, recent commands and these settings are stored in this browser only.')),
+      reset)));
+}
+
 // ── Keyboard ──────────────────────────────────────────────────────────────
 document.addEventListener('keydown', (e) => {
   const inList = !!listEl && listEl.isConnected;
@@ -455,7 +535,7 @@ document.addEventListener('keydown', (e) => {
     paintSelection();
   } else if (e.key === 'Enter') {
     e.preventDefault();
-    if (n) execute(state.visible[state.selected]);
+    if (n) execute(state.visible[state.selected], undefined, e.shiftKey);
   } else if (e.key.toLowerCase() === 'd' && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     if (n) toggleFav(state.visible[state.selected].id);
@@ -466,7 +546,8 @@ document.addEventListener('keydown', (e) => {
 
 // ── Boot ──────────────────────────────────────────────────────────────────
 async function boot() {
-  const stored = await api.storage.local.get(['favs', 'recents', 'theme']).catch(() => ({}));
+  const stored = await api.storage.local.get(['favs', 'recents', 'theme', 'keepOpen']).catch(() => ({}));
+  state.keepOpen = stored.keepOpen !== false;
   state.favs = Array.isArray(stored.favs) ? stored.favs.filter((id) => byId.has(id)) : [];
   state.recents = Array.isArray(stored.recents) ? stored.recents.filter((id) => byId.has(id)) : [];
   state.theme = THEMES.includes(stored.theme) ? stored.theme : 'auto';
@@ -476,6 +557,9 @@ async function boot() {
     save({ theme: state.theme });
     applyTheme();
   });
+  const gear = $('settings');
+  gear.replaceChildren(icon('settings', 18));
+  gear.addEventListener('click', () => (document.querySelector('.settings') ? showList() : showSettings()));
   const about = $('about');
   about.append(`v${api.runtime.getManifest().version}`, icon('external-link', 12));
   about.addEventListener('click', (e) => { e.preventDefault(); api.tabs.create({ url: about.href }); });
@@ -495,7 +579,8 @@ async function boot() {
   }
   if (state.ctx.dynamics) {
     const status = await background({ type: 'imp:status', origin: state.ctx.origin }).catch(() => null);
-    if (status && status.ok) state.imp = { user: status.user, permitted: status.permitted };
+    if (status && status.ok) state.imp = { user: status.user, permitted: status.permitted, check: null };
+    checkImpersonation();
   }
   renderHeader();
   if (listEl.isConnected) renderList();

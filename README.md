@@ -44,6 +44,7 @@ It is inspired by the excellent [Level up for Dynamics 365/Power Apps](https://g
 - **Favourites and recents.** Star the commands you use (Ctrl+D); your last ones stay on top.
 - **Knows where you are.** The header shows the environment, table and record. Commands that need a record explain why they are unavailable instead of failing.
 - **Results stay next to your work.** A side panel in the page, with filter, click-to-copy, CSV and JSON export.
+- **Stays out of your way, your way.** The menu stays open after a command so you can chain several, or closes at once: pick in Settings, and hold Shift to do the opposite once.
 - **Light and dark themes**, following your system or forced.
 - **Safe by design.** No data leaves your browser. No analytics. No remote code.
 
@@ -51,7 +52,7 @@ It is inspired by the excellent [Level up for Dynamics 365/Power Apps](https://g
 
 | Command | What it does |
 |---|---|
-| Show logical names | Toggles schema names on field, tab and section labels |
+| Show logical names | Shows each field's logical name as a chip under its label (click to copy), and on tabs and sections |
 | God mode | Shows hidden fields, tabs and sections, unlocks read-only fields, lifts required flags |
 | Changed fields | Lists the fields with unsaved changes |
 | Fill required fields | Puts placeholder values in empty mandatory fields (lookups are left to you) |
@@ -62,7 +63,7 @@ It is inspired by the excellent [Level up for Dynamics 365/Power Apps](https://g
 | Choice values | The numeric value behind every choice on the form |
 | Clone record | Opens a new form pre-filled with this record's values |
 | Refresh subgrids / Refresh without saving | Reloads subgrids, or the whole record without autosave |
-| Blur sensitive data | Blurs values for screenshots and demos |
+| Blur sensitive data | Blurs field values, lookups, grid cells and the record title for screenshots and demos |
 | Table processes | Workflows, business rules, flows and actions on the table, with their state |
 | Table columns | Column metadata: display, logical and schema names, type, requirement |
 | Open form editor | Opens the current form in the Power Apps form designer |
@@ -119,12 +120,17 @@ Firefox 140 or newer. Download **`Level67-firefox.zip`** from the [latest releas
 | Type | Search commands |
 | `↑` `↓` | Move |
 | `Enter` | Run the selected command |
+| `Shift+Enter` | Run it and do the opposite of your "keep open" setting |
 | `Ctrl+D` | Add to or remove from favourites |
 | `Esc` | Clear the search, go back, or close |
 
 In the side panel: type to filter, click a cell to copy it, `Esc` to close.
 
-**Impersonation.** Run *Impersonate a user*, search by name or email, pick someone. The tab reloads and the app behaves as that user would see it; the toolbar icon shows an **AS** badge. Open the palette and press **Stop** to return to yourself. It ends by itself when you close the browser. You need the *Act on Behalf of Another User* privilege, which System Administrators have. On an on-premises address, the browser asks you once for access to that site.
+**Settings.** The gear icon opens the settings: what the menu does after a command (keep open or close), the theme, and a button to clear favourites and recents.
+
+![Settings panel](docs/settings.png)
+
+**Impersonation.** Run *Impersonate a user*, search by name or email, pick someone. The tab reloads and from then on the server reads and saves data as that user: *Modified by* shows them, with you as the delegate. The page header keeps your own name, because the app loaded it before. The toolbar icon shows an **AS** badge on the tabs of that environment only. Open the palette to see **Acting as …** with **confirmed** next to it once the server itself answers as that user (*My user record* and *My roles and teams* follow the impersonated user too), and press **Stop** to return to yourself. It ends by itself when you close the browser. You need the *Act on Behalf of Another User* privilege, which System Administrators have. On an on-premises address, the browser asks you once for access to that site.
 
 ## Permissions and privacy
 

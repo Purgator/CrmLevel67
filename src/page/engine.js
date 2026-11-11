@@ -4,6 +4,7 @@
 //   run(id, args, opts)  -> run a command; always resolves to { ok, ... }
 //   entities()           -> table list for autocomplete
 //   searchUsers(text)    -> users for impersonation
+//   whoAmI()             -> the user the server answers as
 //   notify(msg, kind)    -> show a toast in the page
 // Every result is plain JSON so it can cross the extension boundary.
 (() => {
@@ -15,7 +16,15 @@
   const FORMATTED = '@OData.Community.Display.V1.FormattedValue';
   const LOOKUP_TYPE = '@Microsoft.Dynamics.CRM.lookuplogicalname';
   const DEFAULT_SOLUTION = 'fd140aaf-4df4-11dd-bd17-0019b9312238';
-  const state = { logical: null, logicalKey: null, blur: null, entities: null, sets: new Map() };
+  // Values worth hiding in a screenshot: field inputs, lookups, grid cells, record title, people.
+  const BLUR = 'input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]):not([type="search"]), textarea, select,'
+    + ' [role="gridcell"], [role="combobox"], [role="textbox"], [contenteditable="true"], .ag-cell,'
+    + ' [data-id="header_title"], [data-id$="selected_tag_text"], [data-id$="_selected_tag"],'
+    + ' [data-id*="fieldControl"] a, [data-id*="fieldControl"] [role="link"], [role="presentation"] > img,'
+    + ' .ms-Persona-primaryText, .ms-Persona-secondaryText';
+  const BLURRED = 'data-l67-blur';
+  const FIELD_LABEL = '[id$="-field-label"]'; // how the Unified Interface ids the label of a form field
+  const state = { logical: null, blur: null, entities: null, sets: new Map() };
   const ui = () => window.__level67ui;
 
   // ── Environment ─────────────────────────────────────────────────────────
@@ -121,6 +130,42 @@
   const attrLabel = (attr) => safe(() => attr.controls.get(0).getLabel(), '') || attr.getName();
   const open = (url) => ({ open: url });
 
+  // This document plus the same-origin frames (the legacy web client keeps forms in one).
+  function docs() {
+    const out = [document];
+    try {
+      for (let i = 0; i < window.frames.length; i++) {
+        try { if (window.frames[i].document) out.push(window.frames[i].document); } catch { /* cross-origin frame */ }
+      }
+    } catch { /* ignore */ }
+    return out;
+  }
+
+  // Adds CSS to a document and returns a function that removes it. Both a
+  // constructed sheet and a <style> element: pages can drop one or block the other.
+  function addCss(doc, css) {
+    const undo = [];
+    try {
+      const sheet = new (doc.defaultView || window).CSSStyleSheet();
+      sheet.replaceSync(css);
+      doc.adoptedStyleSheets = [...doc.adoptedStyleSheets, sheet];
+      undo.push(() => { doc.adoptedStyleSheets = doc.adoptedStyleSheets.filter((x) => x !== sheet); });
+    } catch { /* no constructable stylesheets here */ }
+    try {
+      const style = doc.createElement('style');
+      style.textContent = css;
+      (doc.head || doc.documentElement).append(style);
+      undo.push(() => style.remove());
+    } catch { /* blocked by the page */ }
+    return () => undo.forEach((fn) => safe(fn));
+  }
+
+  // The user the server answers as: the impersonated one while impersonating.
+  async function effectiveUserId(env) {
+    const who = await api(env, 'WhoAmI').catch(() => null);
+    return cleanId(who && who.UserId) || env.userId;
+  }
+
   function display(value) {
     if (value == null) return '';
     if (value instanceof Date) return value.toLocaleString();
@@ -164,25 +209,59 @@
   const handlers = {
     'logical-names'(env) {
       const form = needForm(env);
-      const key = `${env.entity}:${env.recordId}`;
-      if (state.logical && state.logicalKey === key) {
-        for (const [obj, label] of state.logical) safe(() => obj.setLabel(label));
+      if (state.logical) {
+        const same = state.logical.entity === env.entity;
+        state.logical.off();
         state.logical = null;
-        return { toast: 'Original labels restored' };
+        if (same) return { toast: 'Logical names hidden' };
       }
-      const saved = new Map();
-      const tag = (obj) => safe(() => {
+      const undo = [];
+      const relabel = (obj) => safe(() => {
         const label = obj.getLabel();
         const name = obj.getName();
         if (!name || typeof obj.setLabel !== 'function') return;
-        saved.set(obj, label);
         obj.setLabel(label ? `${label} ⟨${name}⟩` : `⟨${name}⟩`);
+        undo.push(() => obj.setLabel(label));
       });
-      each(form.ui.controls, tag);
-      each(form.ui.tabs, (tab) => { tag(tab); each(tab.sections, tag); });
-      state.logical = saved;
-      state.logicalKey = key;
-      return { toast: `Logical names shown on ${saved.size} labels. Run again to restore.` };
+
+      // Fields: a chip under the label, drawn with CSS only so the app's own
+      // rendering is left alone and fields that appear later get one too.
+      const fields = []; // [control name, logical name]
+      each(form.ui.controls, (c) => safe(() => {
+        const name = c.getName();
+        const logical = safe(() => c.getAttribute().getName(), '') || name;
+        if (name && /^[\w.-]+$/.test(name) && /^[\w.-]+$/.test(logical)) fields.push([name, logical]);
+      }));
+      fields.sort((a, b) => a[0].length - b[0].length); // "name" also ends "firstname": the longer rule must win
+      const targets = docs().filter((doc) => safe(() => doc.querySelector(FIELD_LABEL), null));
+      if (targets.length && fields.length) {
+        const css = `${FIELD_LABEL} { display: block !important; height: auto !important; max-height: none !important; overflow: visible !important;`
+          + ' white-space: normal !important; text-overflow: clip !important; cursor: copy; }'
+          + `:has(> ${FIELD_LABEL}) { overflow: visible !important; height: auto !important; max-height: none !important; }`
+          + `${FIELD_LABEL}::after { display: block; width: fit-content; max-width: 100%; box-sizing: border-box; margin: 3px 0 2px; padding: 1px 7px;`
+          + ' border-radius: 6px; background: #4a2fd0; color: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25);'
+          + ' font: 600 11.5px/1.55 "Cascadia Code", Consolas, ui-monospace, monospace; letter-spacing: 0; text-transform: none;'
+          + ' white-space: normal; overflow-wrap: anywhere; }'
+          + fields.map(([name, logical]) => `[id$="${name}-field-label"]::after { content: "${logical}"; }`).join('');
+        const onClick = (e) => {
+          const label = safe(() => e.target.closest(FIELD_LABEL), null);
+          if (!label) return;
+          const hit = fields.filter(([name]) => label.id.endsWith(`${name}-field-label`)).pop();
+          if (!hit) return;
+          Promise.resolve(ui().copy(hit[1])).then((ok) => ui().toast(ok ? `Copied: ${hit[1]}` : 'Could not copy to the clipboard', ok ? 'ok' : 'error'));
+        };
+        for (const doc of targets) {
+          undo.push(addCss(doc, css));
+          doc.addEventListener('click', onClick, true);
+          undo.push(() => doc.removeEventListener('click', onClick, true));
+        }
+      } else {
+        each(form.ui.controls, relabel); // unknown layout (legacy web client): write the name into the label itself
+      }
+      each(form.ui.tabs, (tab) => { relabel(tab); each(tab.sections, relabel); });
+      state.logical = { entity: env.entity, off: () => undo.forEach((fn) => safe(fn)) };
+      return { toast: targets.length ? `Logical names shown on ${fields.length} fields. Click one to copy it. Run again to hide.`
+        : 'Logical names shown. Run again to hide.' };
     },
 
     'god-mode'(env) {
@@ -384,26 +463,46 @@
 
     'blur-data'() {
       if (state.blur) {
-        if (state.blur instanceof CSSStyleSheet) document.adoptedStyleSheets = document.adoptedStyleSheets.filter((s) => s !== state.blur);
-        else state.blur.remove();
+        state.blur.off();
         state.blur = null;
         return { toast: 'Blur removed' };
       }
-      const css = 'input:not([type="checkbox"]):not([type="radio"]), textarea, select, [role="gridcell"], [role="combobox"],'
-        + ' [data-id="header_title"], [data-id$="selected_tag_text"], [data-id*="fieldControl"] a, [role="presentation"] > img,'
-        + ' .ms-Persona-primaryText { filter: blur(5px) !important; }';
-      try {
-        const sheet = new CSSStyleSheet();
-        sheet.replaceSync(css);
-        document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
-        state.blur = sheet;
-      } catch {
-        const style = document.createElement('style');
-        style.textContent = css;
-        document.head.append(style);
-        state.blur = style;
+      // Inline styles, re-applied as the page renders: no stylesheet for the app to drop or override.
+      const apply = () => {
+        let n = 0;
+        for (const doc of docs()) {
+          for (const el of safe(() => [...doc.querySelectorAll(BLUR)], [])) {
+            n++;
+            if (el.hasAttribute(BLURRED)) continue;
+            el.style.setProperty('filter', 'blur(5px)', 'important');
+            el.setAttribute(BLURRED, '');
+          }
+        }
+        return n;
+      };
+      const count = apply();
+      const observers = [];
+      let timer = null;
+      const later = () => { if (!timer) timer = setTimeout(() => { timer = null; apply(); }, 150); };
+      for (const doc of docs()) {
+        safe(() => {
+          const observer = new (doc.defaultView || window).MutationObserver(later);
+          observer.observe(doc.documentElement, { childList: true, subtree: true });
+          observers.push(observer);
+        });
       }
-      return { toast: 'Values blurred. Run again to remove.' };
+      state.blur = { off() {
+        observers.forEach((o) => o.disconnect());
+        clearTimeout(timer);
+        for (const doc of docs()) {
+          for (const el of safe(() => [...doc.querySelectorAll(`[${BLURRED}]`)], [])) {
+            el.style.removeProperty('filter');
+            el.removeAttribute(BLURRED);
+          }
+        }
+      } };
+      return count ? { toast: `${count} values blurred. Run again to remove.` }
+        : { toast: 'Blur is on, but this page shows no value yet. Run again to remove.', kind: 'info' };
     },
 
     async 'table-processes'(env) {
@@ -463,9 +562,10 @@
     },
     'new-record': (env, args) => openRecord(env, entityArg(args), null),
     'open-list': (env, args) => openList(env, entityArg(args)),
-    'my-profile'(env) {
-      if (!env.userId) throw new Error('Could not find the current user.');
-      return openRecord(env, 'systemuser', env.userId);
+    async 'my-profile'(env) {
+      const id = await effectiveUserId(env);
+      if (!id) throw new Error('Could not find the current user.');
+      return openRecord(env, 'systemuser', id);
     },
     'advanced-find': (env) => open(`${env.clientUrl}/main.aspx?pagetype=advancedfind`),
     'maker-portal': (env) => open(env.envId ? `https://make.powerapps.com/environments/${env.envId}/home` : 'https://make.powerapps.com/'),
@@ -527,8 +627,9 @@
     },
 
     async 'my-roles'(env) {
-      if (!env.userId) throw new Error('Could not find the current user.');
-      const u = await api(env, `systemusers(${env.userId})?$select=fullname&$expand=systemuserroles_association($select=name,roleid),teammembership_association($select=name,teamid)`);
+      const id = await effectiveUserId(env);
+      if (!id) throw new Error('Could not find the current user.');
+      const u = await api(env, `systemusers(${id})?$select=fullname&$expand=systemuserroles_association($select=name,roleid),teammembership_association($select=name,teamid)`);
       const row = (name, id) => [name, { text: id, mono: true, dim: true }];
       const roles = (u.systemuserroles_association || []).map((r) => row(r.name, r.roleid)).sort((a, b) => a[0].localeCompare(b[0]));
       const teams = (u.teammembership_association || []).map((t) => row(t.name, t.teamid)).sort((a, b) => a[0].localeCompare(b[0]));
@@ -639,10 +740,22 @@
     }
   }
 
+  // Who the server says we are, so the popup can prove an impersonation is live.
+  async function whoAmI() {
+    try {
+      const env = getEnv();
+      if (!env) return { ok: false, error: 'Not a Dynamics 365 page.' };
+      const who = await api(env, 'WhoAmI');
+      return { ok: true, userId: cleanId(who.UserId), pageUserId: env.userId };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  }
+
   function notify(message, kind, theme) {
     if (theme) ui().setTheme(theme);
     ui().toast(message, kind || 'ok');
   }
 
-  window.__level67 = { version: VERSION, context, run, entities, searchUsers, notify, commands: Object.keys(handlers) };
+  window.__level67 = { version: VERSION, context, run, entities, searchUsers, whoAmI, notify, commands: Object.keys(handlers) };
 })();

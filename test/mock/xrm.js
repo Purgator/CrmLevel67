@@ -218,14 +218,17 @@
     const url = String(typeof input === 'string' ? input : input.url);
     const at = url.indexOf('/api/data/');
     if (at === -1) return realFetch(input, init);
-    const body = route(url.slice(url.indexOf('/', at + 10) + 1));
+    const path = url.slice(url.indexOf('/', at + 10) + 1);
+    const body = route(path);
+    // Hosts that can tell who is impersonated (preview, end-to-end tests) answer WhoAmI as that user.
+    if (path === 'WhoAmI' && typeof window.__mock.effectiveUser === 'function') body.UserId = (await window.__mock.effectiveUser()) || body.UserId;
     const json = body || { error: { code: '0x80060888', message: `Resource not found for the segment '${url.split('/').pop().split('?')[0]}'.` } };
     return { ok: !!body, status: body ? 200 : 404, json: async () => json };
   };
 
   window.Xrm = Xrm;
   window.__mock = {
-    log, RECORD_ID, USER_ID, realFetch,
+    log, RECORD_ID, USER_ID, USERS, realFetch,
     // 'record' = saved record form, 'new' = unsaved create form, 'list' = no form at all
     setMode(mode) { Xrm.Page = mode === 'list' ? { data: null, ui: null } : makeForm(mode); changed(); },
   };

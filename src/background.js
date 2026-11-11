@@ -26,12 +26,29 @@ const locked = (fn) => {
   return next;
 };
 
-async function badge(active) {
-  const names = Object.values(active).map((a) => a.user.name);
-  await api.action.setBadgeText({ text: names.length ? 'AS' : '' });
-  await api.action.setBadgeBackgroundColor({ color: '#d97706' });
-  await api.action.setTitle({ title: names.length ? `Level 67 - impersonating ${names.join(', ')}` : 'Level 67' });
+// The "AS" badge belongs to the tabs of the impersonated environment only.
+// A tab's URL is visible here exactly when we have access to its site, which
+// is always the case for an environment being impersonated.
+async function paint(tab, active) {
+  let origin = '';
+  try { origin = new URL(tab.url).origin; } catch { /* no access to this tab, or no URL yet */ }
+  const user = active[origin]?.user;
+  await api.action.setBadgeText({ tabId: tab.id, text: user ? 'AS' : '' }).catch(() => {});
+  await api.action.setTitle({ tabId: tab.id, title: user ? `Level 67 - acting as ${user.name}` : 'Level 67' }).catch(() => {});
 }
+
+async function badge(active) {
+  await api.action.setBadgeText({ text: '' });
+  await api.action.setBadgeBackgroundColor({ color: '#d97706' });
+  await Promise.all((await api.tabs.query({})).map((tab) => paint(tab, active)));
+}
+
+// Browsers drop per-tab badges on navigation, and a tab can move to or away
+// from an impersonated environment: repaint whenever one loads.
+api.tabs.onUpdated.addListener((tabId, change, tab) => {
+  if (!change.status && !change.url) return;
+  read(ACTIVE, {}).then((active) => paint(tab, active)).catch(() => {});
+});
 
 async function start(origin, user, tabId) {
   const active = await read(ACTIVE, {});
@@ -44,7 +61,8 @@ async function start(origin, user, tabId) {
       id: ruleId,
       priority: 1,
       action: { type: 'modifyHeaders', requestHeaders: [{ ...header, operation: 'set' }] },
-      condition: { urlFilter: `|${origin}/api/data/`, resourceTypes: ['xmlhttprequest'] },
+      // Every kind of request to the Web API, not only XHR: the app also calls it from frames and workers.
+      condition: { urlFilter: `|${origin}/api/data/`, resourceTypes: ['xmlhttprequest', 'main_frame', 'sub_frame', 'ping', 'other'] },
     }],
   });
   active[origin] = { ruleId, user };

@@ -80,7 +80,7 @@
         const input = el('input', { value: show(a.getValue()), disabled: c.getDisabled() });
         input.addEventListener('change', () => a.setValue(input.value || null));
         fields.push(el('div', { className: 'field' + (a.getIsDirty() ? ' dirty' : '') },
-          el('label', null, c.getLabel(), a.getRequiredLevel() === 'required' ? el('i', null, ' *') : ''), input));
+          el('label', { id: 'id-mock-1-' + c.getName() + '-field-label' }, c.getLabel(), a.getRequiredLevel() === 'required' ? el('i', null, ' *') : ''), input));
       });
       const sections = tabs.flatMap((t) => t.sections.get().filter((s) => s.getVisible()).map((s) => s.getLabel()));
       main.replaceChildren(

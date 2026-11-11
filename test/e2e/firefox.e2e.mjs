@@ -28,7 +28,9 @@ const server = createServer(async (req, res) => {
     return res.end(await readFile(path.join(root, 'test/mock/xrm.js')));
   }
   res.writeHead(200, { 'Content-Type': 'text/html' });
-  res.end('<!doctype html><title>Mock org</title><h1>Mock Dynamics 365</h1><input value="secret"><script src="/mock/xrm.js"></script>');
+  res.end('<!doctype html><title>Mock org</title><h1>Mock Dynamics 365</h1><label id="id-1-name-field-label">Account Name</label><input value="secret"><script src="/mock/xrm.js"></script>'
+      + '<script>__mock.effectiveUser = () => __mock.realFetch("/api/data/v9.2/headers").then((r) => r.json())'
+      + '.then((h) => (__mock.USERS.find((u) => u.azureactivedirectoryobjectid === h.callerobjectid) || {}).systemuserid);</script>');
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const origin = `http://localhost:${server.address().port}`;
@@ -110,6 +112,16 @@ try {
     ['contoso-dev · v9.2.26103.165', 'account · Contoso Ltd', 52, 0]);
   step('toolbar click opens the popup, which connects to the page');
 
+  await popup(`type('.search input', 'logical names'); enter();`);
+  await wait(700);
+  assert.match(await popup('return d.getElementById("toast").textContent'), /Logical names shown on \d+ fields/);
+  assert.equal(await page(`return getComputedStyle(document.querySelector('label'), '::after').content`), '"name"');
+  step('the menu stays open by default, and logical names appear as chips');
+
+  await popup(`d.getElementById('settings').click(); d.querySelector('.seg [data-value="false"]').click(); d.getElementById('settings').click();`);
+  await wait(200);
+  step('the settings panel switches to closing after a command');
+
   await popup(`type('.search input', 'god mode'); enter();`);
   await wait(700);
   assert.equal(await page('return Xrm.Page.ui.controls.get("creditlimit").getVisible()'), true);
@@ -145,6 +157,8 @@ try {
 
   await openPopup();
   assert.equal(await popup('return d.querySelector(".banner span").textContent'), 'Acting as Grace Hopper');
+  await wait(400);
+  assert.equal(await popup('return d.querySelector(".banner .check").textContent'), 'confirmed');
   await popup(`d.querySelector('.banner button').click();`);
   await wait(2000);
   assert.equal((await headers()).callerobjectid, undefined);

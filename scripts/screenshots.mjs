@@ -53,6 +53,11 @@ try {
   await popup.waitForSelector('.user');
   await wait(300);
   await page.screenshot({ path: path.join(docs, 'impersonate.png'), clip: await popupClip() });
+  // 5. Settings, light theme.
+  popup = await load('light');
+  await popup.click('#settings');
+  await wait(300);
+  await page.screenshot({ path: path.join(docs, 'settings.png'), clip: await popupClip() });
   console.log('screenshots written to docs/');
 } finally {
   await browser.close();

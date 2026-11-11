@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createPage } from './helpers.mjs';
+import { createPage, fakeElement } from './helpers.mjs';
 
 const ID = 'a1b2c3d4-0000-4000-8000-000000000067';
 const plain = (v) => JSON.parse(JSON.stringify(v)); // strip the vm realm's prototypes
@@ -45,14 +45,35 @@ test('form commands explain themselves when no record is open or saved', async (
   assert.match((await page.run('all-fields')).error, /not been saved/);
 });
 
-test('logical names toggle on and restore exactly', async () => {
+test('logical names are drawn as chips under the field labels', async () => {
+  const page = createPage({ fieldLabels: true });
+  const res = await ok(page, 'logical-names');
+  assert.match(res.toast, /shown on \d+ fields/);
+  const [sheet] = page.window.document.adoptedStyleSheets;
+  assert.ok(sheet.css.includes('[id$="name-field-label"]::after { content: "name"; }'));
+  assert.ok(sheet.css.indexOf('"name-field-label"') < sheet.css.indexOf('"accountnumber-field-label"'), 'shorter names first, so the longer rule wins');
+  assert.equal(control(page, 'name').getLabel(), 'Account Name', 'field labels themselves are left alone');
+  assert.equal(page.xrm.Page.ui.tabs.get(0).getLabel(), 'Summary ⟨SUMMARY_TAB⟩');
+  // Clicking a label copies its logical name.
+  const [onClick] = [...page.listeners];
+  onClick({ target: { closest: () => ({ id: 'id-1-accountnumber-field-label' }) } });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(page.copied, ['accountnumber']);
+  assert.match(page.toasts.at(-1).message, /Copied: accountnumber/);
+  assert.match((await ok(page, 'logical-names')).toast, /hidden/);
+  assert.equal(page.window.document.adoptedStyleSheets.length, 0);
+  assert.equal(page.listeners.size, 0);
+  assert.equal(page.xrm.Page.ui.tabs.get(0).getLabel(), 'Summary');
+});
+
+test('logical names fall back to the labels on an unknown layout', async () => {
   const page = createPage();
   await ok(page, 'logical-names');
   assert.equal(control(page, 'name').getLabel(), 'Account Name ⟨name⟩');
   assert.equal(page.xrm.Page.ui.tabs.get(0).getLabel(), 'Summary ⟨SUMMARY_TAB⟩');
   assert.equal(page.xrm.Page.ui.tabs.get(0).sections.get(0).getLabel(), 'Account Information ⟨ACCOUNT_INFORMATION⟩');
   const res = await ok(page, 'logical-names');
-  assert.match(res.toast, /restored/);
+  assert.match(res.toast, /hidden/);
   assert.equal(control(page, 'name').getLabel(), 'Account Name');
   assert.equal(page.xrm.Page.ui.tabs.get(0).getLabel(), 'Summary');
 });
@@ -156,13 +177,29 @@ test('refresh subgrids and refresh form', async () => {
   assert.equal(attr(page, 'name').getIsDirty(), false);
 });
 
-test('blur toggles a stylesheet', async () => {
+test('blur marks every value, and removes the marks again', async () => {
+  const elements = [fakeElement(), fakeElement(), fakeElement()];
+  const page = createPage({ elements });
+  assert.equal((await ok(page, 'blur-data')).toast, '3 values blurred. Run again to remove.');
+  assert.ok(elements.every((e) => e.style.get('filter') === 'blur(5px) !important' && e.hasAttribute('data-l67-blur')));
+  assert.equal((await ok(page, 'blur-data')).toast, 'Blur removed');
+  assert.ok(elements.every((e) => e.style.get('filter') === undefined && !e.hasAttribute('data-l67-blur')));
+});
+
+test('blur says so when the page shows nothing to blur', async () => {
   const page = createPage();
-  await ok(page, 'blur-data');
-  assert.equal(page.window.document.adoptedStyleSheets.length, 1);
-  assert.match(page.window.document.adoptedStyleSheets[0].css, /blur\(5px\)/);
-  await ok(page, 'blur-data');
-  assert.equal(page.window.document.adoptedStyleSheets.length, 0);
+  const res = await ok(page, 'blur-data');
+  assert.equal(res.kind, 'info');
+  assert.match(res.toast, /no value yet/);
+});
+
+test('whoAmI reports the user the server answers as', async () => {
+  const page = createPage();
+  assert.deepEqual(plain(await page.engine.whoAmI()), { ok: true, userId: page.mock.USER_ID, pageUserId: page.mock.USER_ID });
+  page.mock.effectiveUser = () => page.mock.USERS[2].systemuserid; // impersonating Grace
+  assert.equal((await page.engine.whoAmI()).userId, page.mock.USERS[2].systemuserid);
+  await ok(page, 'my-profile');
+  assert.match(page.mock.log.at(-1), new RegExp(`^openForm \\{"entityName":"systemuser","entityId":"${page.mock.USERS[2].systemuserid}"`));
 });
 
 test('table processes are grouped by kind', async () => {

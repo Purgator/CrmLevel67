@@ -24,6 +24,7 @@ button { cursor: pointer; }
 svg { display: block; flex: none; }
 
 .top { display: flex; align-items: center; gap: 10px; padding: 12px 14px 10px; }
+.top .ghost + .ghost { margin-left: -8px; }
 .logo { border-radius: 9px; }
 .brand { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .brand strong { font-size: 15px; letter-spacing: -.01em; }
@@ -45,6 +46,9 @@ svg { display: block; flex: none; }
 .banner span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .banner b { color: var(--fg); }
 .banner button { border: 1px solid currentColor; background: none; color: inherit; border-radius: 6px; padding: 2px 9px; font-weight: 600; }
+.banner .check { flex: none; font-style: normal; font-weight: 600; font-size: 11px; padding: 1px 7px; border-radius: 99px;
+  background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.banner.bad .check { background: var(--err); color: #fff; }
 .banner button:hover { background: color-mix(in srgb, currentColor 14%, transparent); }
 
 main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -102,6 +106,15 @@ input::placeholder { color: var(--fg3); }
 .primary { border: 0; border-radius: 10px; padding: 9px 16px; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--on-accent); font-weight: 650; }
 .primary:hover { filter: brightness(1.07); }
 .primary:disabled { opacity: .55; cursor: progress; }
+.secondary { border: 1px solid var(--line); background: var(--bg2); border-radius: 9px; padding: 6px 12px; font-weight: 600; white-space: nowrap; }
+.secondary:hover { border-color: var(--fg3); }
+.settings { overflow-y: auto; }
+.setting { display: flex; align-items: center; gap: 14px; padding: 12px 0; border-top: 1px solid var(--line); }
+.setting > div:first-child { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.setting small { color: var(--fg2); font-size: 12px; }
+.seg { flex: none; display: flex; padding: 3px; border-radius: 10px; background: var(--bg3); }
+.seg button { border: 0; background: none; border-radius: 7px; padding: 5px 10px; color: var(--fg2); font-size: 12px; font-weight: 600; white-space: nowrap; }
+.seg button[aria-checked="true"] { background: var(--bg); color: var(--fg); box-shadow: 0 1px 3px rgba(0, 0, 0, .18); }
 .users { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -6px; }
 .user { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: 0; background: none; padding: 7px 8px; border-radius: 10px; }
 .user:hover, .user:focus-visible { background: var(--accent-soft); }
@@ -119,6 +132,7 @@ footer a:hover { color: var(--accent); }
 
 .toast { position: absolute; left: 14px; right: 14px; bottom: 44px; padding: 10px 12px; border-radius: 10px; background: var(--fg); color: var(--bg);
   box-shadow: 0 10px 30px rgba(0, 0, 0, .3); display: flex; gap: 8px; align-items: flex-start; animation: up .16s ease-out; }
+.toast.ok svg { color: var(--ok); }
 .toast.error { background: var(--err); color: #fff; }
 :root[data-theme="dark"] .toast.error { color: #1a0a0e; }
 @keyframes up { from { opacity: 0; transform: translateY(6px); } }
