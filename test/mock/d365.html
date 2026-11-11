@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mock Dynamics 365 - Level 67 preview</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 "Segoe UI", system-ui, sans-serif; background: #f3f2f1; color: #201f1e; display: grid; grid-template-rows: 48px 1fr; height: 100vh; }
+  .shell { background: #0b3a66; color: #fff; display: flex; align-items: center; gap: 14px; padding: 0 16px; }
+  .shell b { font-size: 15px; } .shell span { opacity: .75; }
+  .shell .modes { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+  .shell button { border: 1px solid rgba(255,255,255,.4); background: none; color: #fff; border-radius: 4px; padding: 3px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+  .shell button.on { background: #fff; color: #0b3a66; font-weight: 600; }
+  .app { display: grid; grid-template-columns: 180px minmax(0, 1fr) 472px; min-height: 0; }
+  nav { background: #e6e4e2; padding: 12px 0; } nav div { padding: 8px 16px; } nav div.on { background: #fff; border-left: 3px solid #0b3a66; font-weight: 600; }
+  main { overflow: auto; padding: 16px 20px; }
+  .card { background: #fff; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,.12); padding: 16px 20px; margin-bottom: 14px; }
+  h1 { margin: 0; font-size: 20px; } .sub { color: #605e5c; font-size: 12px; }
+  .tabs { display: flex; gap: 22px; margin-top: 12px; border-bottom: 1px solid #edebe9; } .tabs span { padding: 6px 0; } .tabs span:first-child { border-bottom: 2px solid #0b3a66; font-weight: 600; }
+  h2 { margin: 0 0 10px; font-size: 14px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 28px; }
+  .field { display: grid; grid-template-columns: 44% 56%; align-items: center; border-bottom: 1px solid #f3f2f1; min-height: 34px; }
+  .field label { color: #605e5c; font-size: 13px; padding-right: 8px; overflow-wrap: anywhere; } .field label i { color: #a4262c; font-style: normal; }
+  .field input { border: 0; font: inherit; padding: 5px 6px; width: 100%; background: none; color: inherit; }
+  .field input:disabled { color: #a19f9d; }
+  .field.dirty input { background: #fff8d6; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; } td, th { text-align: left; padding: 6px 8px; border-bottom: 1px solid #edebe9; } th { color: #605e5c; font-weight: 600; }
+  aside { background: #dfe3ea; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+  aside small { color: #48515f; }
+  iframe { width: 440px; height: 580px; border: 0; border-radius: 10px; box-shadow: 0 12px 34px rgba(0,0,0,.28); background: #fff; flex: none; }
+  pre { flex: 1; min-height: 60px; margin: 0; overflow: auto; background: #1b1f27; color: #b8f5c9; border-radius: 8px; padding: 8px 10px; font: 11.5px/1.5 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+  <div class="shell">
+    <b>Dynamics 365</b><span>Sales Hub (mock environment for Level 67)</span>
+    <div class="modes">Page:
+      <button data-mode="record" class="on">Saved record</button>
+      <button data-mode="new">New record</button>
+      <button data-mode="list">List (no form)</button>
+    </div>
+  </div>
+  <div class="app">
+    <nav><div>Home</div><div>Dashboards</div><div class="on">Accounts</div><div>Contacts</div><div>Leads</div><div>Opportunities</div></nav>
+    <main id="main"></main>
+    <aside>
+      <small>The extension popup, simulated. In a real browser it opens from the toolbar icon.</small>
+      <iframe id="popup" src="/popup/popup.html" title="Level 67 popup"></iframe>
+      <small>What the extension asked the page and the browser to do:</small>
+      <pre id="log"></pre>
+    </aside>
+  </div>
+
+  <script src="/mock/xrm.js"></script>
+  <script src="/page/ui.js"></script>
+  <script src="/page/engine.js"></script>
+  <script>
+    const el = (tag, props, ...kids) => { const n = Object.assign(document.createElement(tag), props || {}); n.append(...kids.flat()); return n; };
+    const show = (v) => v == null ? '' : v instanceof Date ? v.toLocaleString() : Array.isArray(v) ? v.map((x) => x.name || x).join(', ') : String(v);
+
+    function render() {
+      const main = document.getElementById('main');
+      const page = Xrm.Page;
+      document.getElementById('log').textContent = __mock.log.slice(-40).join('\n') || '(nothing yet)';
+      if (!page.data) {
+        main.replaceChildren(el('div', { className: 'card' }, el('h1', null, 'Active Accounts'), el('div', { className: 'sub' }, 'A list page: no record is open.'),
+          el('table', null, el('tr', null, el('th', null, 'Account Name'), el('th', null, 'Main Phone'), el('th', null, 'City')),
+            ...[['Contoso Ltd', '+33 1 23 45 67 89', 'Paris'], ['Fabrikam Inc', '+1 425 555 0100', 'Redmond'], ['Northwind', '+44 20 7946 0958', 'London']]
+              .map((r) => el('tr', null, ...r.map((c) => el('td', { role: 'gridcell' }, c)))))));
+        return;
+      }
+      const tabs = page.ui.tabs.get().filter((t) => t.getVisible());
+      const fields = [];
+      const grids = [];
+      page.ui.controls.forEach((c) => {
+        if (!c.getVisible()) return;
+        if (c.getControlType() === 'subgrid') { grids.push(c); return; }
+        const a = c.getAttribute();
+        const input = el('input', { value: show(a.getValue()), disabled: c.getDisabled() });
+        input.addEventListener('change', () => a.setValue(input.value || null));
+        fields.push(el('div', { className: 'field' + (a.getIsDirty() ? ' dirty' : '') },
+          el('label', null, c.getLabel(), a.getRequiredLevel() === 'required' ? el('i', null, ' *') : ''), input));
+      });
+      const sections = tabs.flatMap((t) => t.sections.get().filter((s) => s.getVisible()).map((s) => s.getLabel()));
+      main.replaceChildren(
+        el('div', { className: 'card' },
+          el('h1', { }, show(page.data.entity.getPrimaryAttributeValue()) || 'New Account'),
+          el('div', { className: 'sub' }, 'Account · ' + (page.data.entity.getId() ? 'Saved' : 'Unsaved')),
+          el('div', { className: 'tabs' }, ...tabs.map((t) => el('span', null, t.getLabel())))),
+        el('div', { className: 'card' }, el('h2', null, sections.join('  ·  ')), el('div', { className: 'grid' }, fields)),
+        ...grids.map((g) => el('div', { className: 'card' }, el('h2', null, g.getLabel()),
+          el('table', null, el('tr', null, el('th', null, 'Name'), el('th', null, 'Email')),
+            el('tr', null, el('td', { role: 'gridcell' }, 'Ada Lovelace'), el('td', { role: 'gridcell' }, 'ada@contoso.example')),
+            el('tr', null, el('td', { role: 'gridcell' }, 'Grace Hopper'), el('td', { role: 'gridcell' }, 'grace@contoso.example'))))));
+    }
+    window.__mockChanged = () => requestAnimationFrame(render);
+    for (const btn of document.querySelectorAll('[data-mode]')) {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('on', b === btn));
+        __mock.setMode(btn.dataset.mode);
+        document.getElementById('popup').contentWindow.location.reload();
+      });
+    }
+    render();
+  </script>
+</body>
+</html>
