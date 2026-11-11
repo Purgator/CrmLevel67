@@ -1,0 +1,648 @@
+// Level 67 engine. Injected in the page's MAIN world so it can reach the
+// Dynamics 365 client API (Xrm). Exposes window.__level67 with:
+//   context()            -> what the popup needs to know about this page
+//   run(id, args, opts)  -> run a command; always resolves to { ok, ... }
+//   entities()           -> table list for autocomplete
+//   searchUsers(text)    -> users for impersonation
+//   notify(msg, kind)    -> show a toast in the page
+// Every result is plain JSON so it can cross the extension boundary.
+(() => {
+  'use strict';
+  const VERSION = '1.0.0';
+  if (window.__level67 && window.__level67.version === VERSION) return;
+
+  const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const FORMATTED = '@OData.Community.Display.V1.FormattedValue';
+  const LOOKUP_TYPE = '@Microsoft.Dynamics.CRM.lookuplogicalname';
+  const DEFAULT_SOLUTION = 'fd140aaf-4df4-11dd-bd17-0019b9312238';
+  const state = { logical: null, logicalKey: null, blur: null, entities: null, sets: new Map() };
+  const ui = () => window.__level67ui;
+
+  // ── Environment ─────────────────────────────────────────────────────────
+  function findXrm() {
+    const wins = [window];
+    try { for (let i = 0; i < window.frames.length; i++) wins.push(window.frames[i]); } catch { /* ignore */ }
+    let fallback = null;
+    for (const w of wins) {
+      try {
+        const x = w.Xrm;
+        if (!x) continue;
+        if (formOf(x)) return x; // legacy web client keeps the form in an iframe
+        fallback = fallback || x;
+      } catch { /* cross-origin frame */ }
+    }
+    return fallback;
+  }
+
+  function formOf(xrm) {
+    try {
+      const p = xrm.Page;
+      return p && p.data && p.data.entity && p.ui ? p : null;
+    } catch { return null; }
+  }
+
+  const safe = (fn, fallback) => { try { const v = fn(); return v == null ? fallback : v; } catch { return fallback; } };
+  const cleanId = (id) => String(id || '').replace(/[{}]/g, '').toLowerCase();
+
+  function getEnv() {
+    const xrm = findXrm();
+    if (!xrm) return null;
+    const gc = safe(() => xrm.Utility.getGlobalContext()) || safe(() => xrm.Page.context);
+    if (!gc || typeof gc.getClientUrl !== 'function') return null;
+    const version = safe(() => gc.getVersion(), '9.2');
+    const [major, minor] = version.split('.').map(Number);
+    const apiVersion = major > 9 || (major === 9 && minor >= 2) ? 'v9.2' : `v${major}.${minor || 0}`;
+    const clientUrl = gc.getClientUrl().replace(/\/$/, '');
+    const form = formOf(xrm);
+    const org = gc.organizationSettings || {};
+    const user = gc.userSettings || {};
+    return {
+      xrm, gc, form, version, clientUrl,
+      apiBase: `${clientUrl}/api/data/${apiVersion}`,
+      entity: form ? safe(() => form.data.entity.getEntityName(), '') : '',
+      recordId: form ? cleanId(safe(() => form.data.entity.getId(), '')) : '',
+      orgName: org.uniqueName || safe(() => gc.getOrgUniqueName(), ''),
+      envId: org.bapEnvironmentId || '',
+      userId: cleanId(user.userId || safe(() => gc.getUserId(), '')),
+      userName: user.userName || safe(() => gc.getUserName(), ''),
+    };
+  }
+
+  function needForm(env) {
+    if (!env.form) throw new Error('Open a record form first.');
+    return env.form;
+  }
+  function needSaved(env) {
+    needForm(env);
+    if (!env.recordId) throw new Error('This record has not been saved yet.');
+    return env.form;
+  }
+  function entityArg(args) {
+    const name = String((args && args.entity) || '').trim().toLowerCase();
+    if (!/^[a-z][a-z0-9_]*$/.test(name)) throw new Error('Enter a table logical name, like "account".');
+    return name;
+  }
+
+  // Resolve even if a platform promise never settles, so the popup cannot hang.
+  const settle = (promise, ms = 4000) => Promise.race([promise, new Promise((r) => setTimeout(r, ms))]);
+
+  // ── Web API ─────────────────────────────────────────────────────────────
+  async function api(env, path) {
+    const res = await fetch(`${env.apiBase}/${path.replace(/^\/+/, '')}`, {
+      credentials: 'same-origin',
+      headers: {
+        Accept: 'application/json',
+        'OData-MaxVersion': '4.0',
+        'OData-Version': '4.0',
+        Prefer: 'odata.include-annotations="*"',
+      },
+    });
+    if (!res.ok) {
+      let message = '';
+      try { message = (await res.json()).error.message; } catch { /* not JSON */ }
+      throw new Error(message || `Web API request failed (HTTP ${res.status}).`);
+    }
+    return res.status === 204 ? null : res.json();
+  }
+
+  async function entitySet(env, name) {
+    if (state.sets.has(name)) return state.sets.get(name);
+    const meta = await api(env, `EntityDefinitions(LogicalName='${name}')?$select=EntitySetName`);
+    state.sets.set(name, meta.EntitySetName);
+    return meta.EntitySetName;
+  }
+
+  async function recordPath(env) {
+    return `${await entitySet(env, env.entity)}(${env.recordId})`;
+  }
+
+  // ── Small helpers ───────────────────────────────────────────────────────
+  const each = (collection, fn) => { try { collection.forEach(fn); } catch { /* ignore */ } };
+  const attrLabel = (attr) => safe(() => attr.controls.get(0).getLabel(), '') || attr.getName();
+  const open = (url) => ({ open: url });
+
+  function display(value) {
+    if (value == null) return '';
+    if (value instanceof Date) return value.toLocaleString();
+    if (Array.isArray(value)) return value.map((v) => (v && typeof v === 'object' ? v.name || v.id : v)).join(', ');
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  }
+
+  function reloadWith(mutate) {
+    const url = new URL(window.location.href);
+    mutate(url.searchParams);
+    setTimeout(() => window.location.assign(url.toString()), 150);
+    return { navigate: url.toString(), toast: 'Reloading…', kind: 'info' };
+  }
+  function setFlag(params, key, value) {
+    const flags = new Map((params.get('flags') || '').split(',').filter(Boolean).map((f) => {
+      const i = f.indexOf('=');
+      return i === -1 ? [f, 'true'] : [f.slice(0, i), f.slice(i + 1)];
+    }));
+    flags.set(key, value);
+    params.set('flags', [...flags].map(([k, v]) => `${k}=${v}`).join(','));
+  }
+
+  async function openList(env, entity) {
+    const nav = env.xrm.Navigation;
+    if (nav && nav.navigateTo) {
+      await settle(nav.navigateTo({ pageType: 'entitylist', entityName: entity }));
+      return {};
+    }
+    return open(`${env.clientUrl}/main.aspx?pagetype=entitylist&etn=${entity}`);
+  }
+  async function openRecord(env, entity, id, params) {
+    const nav = env.xrm.Navigation;
+    if (nav && nav.openForm) await settle(nav.openForm({ entityName: entity, entityId: id || undefined }, params));
+    else env.xrm.Utility.openEntityForm(entity, id || undefined, params);
+    return {};
+  }
+  const list = (entity) => (env) => openList(env, entity);
+
+  // ── Commands ────────────────────────────────────────────────────────────
+  const handlers = {
+    'logical-names'(env) {
+      const form = needForm(env);
+      const key = `${env.entity}:${env.recordId}`;
+      if (state.logical && state.logicalKey === key) {
+        for (const [obj, label] of state.logical) safe(() => obj.setLabel(label));
+        state.logical = null;
+        return { toast: 'Original labels restored' };
+      }
+      const saved = new Map();
+      const tag = (obj) => safe(() => {
+        const label = obj.getLabel();
+        const name = obj.getName();
+        if (!name || typeof obj.setLabel !== 'function') return;
+        saved.set(obj, label);
+        obj.setLabel(label ? `${label} ⟨${name}⟩` : `⟨${name}⟩`);
+      });
+      each(form.ui.controls, tag);
+      each(form.ui.tabs, (tab) => { tag(tab); each(tab.sections, tag); });
+      state.logical = saved;
+      state.logicalKey = key;
+      return { toast: `Logical names shown on ${saved.size} labels. Run again to restore.` };
+    },
+
+    'god-mode'(env) {
+      const form = needForm(env);
+      let n = 0;
+      each(form.ui.controls, (c) => {
+        safe(() => { if (c.getVisible && !c.getVisible()) { c.setVisible(true); n++; } });
+        safe(() => { if (c.getDisabled && c.getDisabled()) { c.setDisabled(false); n++; } });
+      });
+      each(form.data.entity.attributes, (a) => safe(() => {
+        if (a.getRequiredLevel() !== 'none') { a.setRequiredLevel('none'); n++; }
+      }));
+      each(form.ui.tabs, (tab) => {
+        safe(() => { if (!tab.getVisible()) { tab.setVisible(true); n++; } });
+        each(tab.sections, (s) => safe(() => { if (!s.getVisible()) { s.setVisible(true); n++; } }));
+      });
+      return { toast: n ? `God mode on: ${n} restrictions lifted` : 'Nothing was hidden, locked or required' };
+    },
+
+    'changed-fields'(env) {
+      const form = needForm(env);
+      const rows = [];
+      each(form.data.entity.attributes, (a) => {
+        if (safe(() => a.getIsDirty(), false)) rows.push([attrLabel(a), { text: a.getName(), mono: true }, display(safe(() => a.getValue()))]);
+      });
+      if (!rows.length) return { toast: 'No unsaved changes on this form', kind: 'info' };
+      ui().panel({ title: 'Changed fields', subtitle: `${rows.length} unsaved change${rows.length > 1 ? 's' : ''} on ${env.entity}`,
+        sections: [{ columns: ['Field', 'Logical name', 'New value'], rows }] });
+      return {};
+    },
+
+    'fill-required'(env) {
+      const form = needForm(env);
+      let filled = 0;
+      let skipped = 0;
+      each(form.data.entity.attributes, (a) => {
+        try {
+          if (a.getRequiredLevel() !== 'required' || a.getValue() != null) return;
+          const type = a.getAttributeType();
+          let value;
+          if (type === 'string' || type === 'memo') {
+            const format = safe(() => a.getFormat(), '');
+            value = format === 'email' ? 'level67@example.com' : format === 'url' ? 'https://example.com' : 'Level 67';
+            const max = safe(() => a.getMaxLength(), 0);
+            if (max) value = value.slice(0, max);
+          } else if (['integer', 'decimal', 'double', 'money'].includes(type)) {
+            const min = safe(() => a.getMin(), 0);
+            const max = safe(() => a.getMax(), 0);
+            value = min > 0 ? min : max < 0 ? max : 0;
+          } else if (type === 'boolean') value = false;
+          else if (type === 'datetime') value = new Date();
+          else if (type === 'optionset' || type === 'multiselectoptionset') {
+            const first = (a.getOptions() || []).find((o) => o && o.value != null && o.value !== -1);
+            if (!first) { skipped++; return; }
+            value = type === 'optionset' ? first.value : [first.value];
+          } else { skipped++; return; } // lookups need a real record: left to the user
+          a.setValue(value);
+          filled++;
+        } catch { skipped++; }
+      });
+      if (!filled && !skipped) return { toast: 'No empty required field', kind: 'info' };
+      return { toast: `${filled} required field${filled === 1 ? '' : 's'} filled${skipped ? `, ${skipped} left for you (lookups)` : ''}`, kind: skipped ? 'warn' : 'ok' };
+    },
+
+    'copy-record-id'(env) {
+      needSaved(env);
+      return { copy: env.recordId, toast: `Record ID copied: ${env.recordId}` };
+    },
+
+    'copy-record-url'(env) {
+      needSaved(env);
+      const appId = new URL(window.location.href).searchParams.get('appid');
+      const url = `${env.clientUrl}/main.aspx?${appId ? `appid=${appId}&` : ''}pagetype=entityrecord&etn=${env.entity}&id=${env.recordId}`;
+      return { copy: url, toast: 'Record URL copied' };
+    },
+
+    async 'open-web-api'(env) {
+      needSaved(env);
+      return open(`${env.apiBase}/${await recordPath(env)}`);
+    },
+
+    async 'all-fields'(env) {
+      needSaved(env);
+      const record = await api(env, await recordPath(env));
+      const rows = [];
+      const columnName = (key) => (/^_.+_value$/.test(key) ? key.slice(1, -6) : key); // lookups come back as _name_value
+      for (const key of Object.keys(record).sort((a, b) => columnName(a).localeCompare(columnName(b)))) {
+        if (key.includes('@')) continue;
+        const value = record[key];
+        const lookup = record[key + LOOKUP_TYPE];
+        const name = columnName(key);
+        const shown = record[key + FORMATTED];
+        rows.push([
+          { text: name, mono: true },
+          value == null ? { text: 'null', dim: true, mono: true } : { text: typeof value === 'object' ? JSON.stringify(value) : value, mono: true },
+          shown == null ? (lookup ? `(${lookup})` : '') : lookup ? `${shown} (${lookup})` : shown,
+        ]);
+      }
+      ui().panel({ title: 'All fields', subtitle: `${env.entity} · ${env.recordId}`, wide: true, name: `${env.entity}-fields`, json: record,
+        sections: [{ columns: ['Column', 'Value', 'Display value'], rows }] });
+      return {};
+    },
+
+    async 'record-properties'(env) {
+      const form = needSaved(env);
+      const r = await api(env, await recordPath(env));
+      const rows = [];
+      const add = (label, value, mono) => { if (value != null && value !== '') rows.push([label, mono ? { text: value, mono: true } : value]); };
+      add('Table', env.entity, true);
+      add('Record ID', env.recordId, true);
+      add('Name', safe(() => form.data.entity.getPrimaryAttributeValue()));
+      add('Created on', r['createdon' + FORMATTED] || r.createdon);
+      add('Created by', r['_createdby_value' + FORMATTED]);
+      add('Modified on', r['modifiedon' + FORMATTED] || r.modifiedon);
+      add('Modified by', r['_modifiedby_value' + FORMATTED]);
+      add('Owner', r['_ownerid_value' + FORMATTED]);
+      add('Owner ID', r._ownerid_value, true);
+      add('Business unit', r['_owningbusinessunit_value' + FORMATTED]);
+      add('Status', r.statecode == null ? null : `${r['statecode' + FORMATTED] || ''} (${r.statecode})`);
+      add('Status reason', r.statuscode == null ? null : `${r['statuscode' + FORMATTED] || ''} (${r.statuscode})`);
+      add('Version number', r.versionnumber, true);
+      const frows = [];
+      const item = safe(() => form.ui.formSelector.getCurrentItem());
+      if (item) {
+        frows.push(['Form name', safe(() => item.getLabel(), '')]);
+        frows.push(['Form ID', { text: cleanId(safe(() => item.getId(), '')), mono: true }]);
+      }
+      const types = { 1: 'Create', 2: 'Update', 3: 'Read only', 4: 'Disabled', 6: 'Bulk edit' };
+      const ft = safe(() => form.ui.getFormType());
+      if (ft != null) frows.push(['Form type', `${types[ft] || 'Unknown'} (${ft})`]);
+      ui().panel({ title: 'Record properties', subtitle: `${env.entity} · ${env.recordId}`, name: `${env.entity}-properties`,
+        sections: [{ title: 'Record', rows }, { title: 'Form', rows: frows }] });
+      return {};
+    },
+
+    'optionset-values'(env) {
+      const form = needForm(env);
+      const sections = [];
+      each(form.data.entity.attributes, (a) => {
+        const options = safe(() => a.getOptions());
+        if (!Array.isArray(options) || !options.length) return;
+        const current = [].concat(safe(() => a.getValue(), []));
+        sections.push({
+          title: `${attrLabel(a)} · ${a.getName()}`,
+          rows: options.filter((o) => o && o.value != null).map((o) => [
+            { text: o.value, mono: true }, o.text,
+            current.includes(o.value) ? { text: 'selected', tag: 'on' } : '',
+          ]),
+        });
+      });
+      if (!sections.length) return { toast: 'No choice field on this form', kind: 'info' };
+      sections.sort((a, b) => a.title.localeCompare(b.title));
+      ui().panel({ title: 'Choice values', subtitle: `${sections.length} choice fields on ${env.entity}`, name: `${env.entity}-choices`, sections });
+      return {};
+    },
+
+    async 'clone-record'(env) {
+      const form = needForm(env);
+      const skip = new Set(['createdon', 'createdby', 'modifiedon', 'modifiedby', 'createdonbehalfby', 'modifiedonbehalfby',
+        'statecode', 'statuscode', 'ownerid', 'owningbusinessunit', 'owninguser', 'owningteam', `${env.entity}id`]);
+      const params = {};
+      let n = 0;
+      each(form.data.entity.attributes, (a) => {
+        try {
+          const name = a.getName();
+          const value = a.getValue();
+          if (skip.has(name) || value == null || value === '') return;
+          const type = a.getAttributeType();
+          if (type === 'lookup' || type === 'customer' || type === 'owner') {
+            if (!value[0] || value.length > 1) return; // party lists cannot be passed as parameters
+            params[name] = cleanId(value[0].id);
+            params[`${name}name`] = value[0].name || '';
+            params[`${name}type`] = value[0].entityType;
+          } else if (type === 'datetime') params[name] = value.toISOString();
+          else if (type === 'multiselectoptionset') params[name] = `[${value.join(',')}]`;
+          else if (['string', 'memo', 'boolean', 'optionset', 'integer', 'decimal', 'double', 'money'].includes(type)) params[name] = value;
+          else return;
+          n++;
+        } catch { /* skip unreadable attribute */ }
+      });
+      await openRecord(env, env.entity, null, params);
+      return { toast: `Clone opened with ${n} values copied. Review, then save.` };
+    },
+
+    'refresh-subgrids'(env) {
+      const form = needForm(env);
+      let n = 0;
+      each(form.ui.controls, (c) => safe(() => {
+        if (c.getControlType() === 'subgrid' && c.refresh) { c.refresh(); n++; }
+      }));
+      return n ? { toast: `${n} subgrid${n > 1 ? 's' : ''} refreshed` } : { toast: 'No subgrid on this form', kind: 'info' };
+    },
+
+    async 'refresh-form'(env) {
+      const form = needSaved(env);
+      await settle(form.data.refresh(false));
+      return { toast: 'Form reloaded without saving' };
+    },
+
+    'blur-data'() {
+      if (state.blur) {
+        if (state.blur instanceof CSSStyleSheet) document.adoptedStyleSheets = document.adoptedStyleSheets.filter((s) => s !== state.blur);
+        else state.blur.remove();
+        state.blur = null;
+        return { toast: 'Blur removed' };
+      }
+      const css = 'input:not([type="checkbox"]):not([type="radio"]), textarea, select, [role="gridcell"], [role="combobox"],'
+        + ' [data-id="header_title"], [data-id$="selected_tag_text"], [data-id*="fieldControl"] a, [role="presentation"] > img,'
+        + ' .ms-Persona-primaryText { filter: blur(5px) !important; }';
+      try {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(css);
+        document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+        state.blur = sheet;
+      } catch {
+        const style = document.createElement('style');
+        style.textContent = css;
+        document.head.append(style);
+        state.blur = style;
+      }
+      return { toast: 'Values blurred. Run again to remove.' };
+    },
+
+    async 'table-processes'(env) {
+      needForm(env);
+      const data = await api(env, `workflows?$select=name,category,statecode,mode&$filter=primaryentity eq '${env.entity}' and type eq 1&$orderby=name`);
+      const kinds = { 0: 'Workflows', 1: 'Dialogs', 2: 'Business rules', 3: 'Actions', 4: 'Business process flows', 5: 'Cloud flows', 6: 'Desktop flows' };
+      const groups = new Map();
+      for (const w of data.value) {
+        const title = kinds[w.category] || `Other (${w.category})`;
+        if (!groups.has(title)) groups.set(title, []);
+        groups.get(title).push([
+          w.name,
+          w.statecode === 1 ? { text: 'Active', tag: 'on' } : { text: 'Draft', tag: 'off' },
+          w.category === 0 ? (w.mode === 1 ? 'Real-time' : 'Background') : '',
+          { text: w.workflowid, mono: true, dim: true },
+        ]);
+      }
+      if (!groups.size) return { toast: `No process on ${env.entity}`, kind: 'info' };
+      ui().panel({ title: 'Table processes', subtitle: `${data.value.length} processes on ${env.entity}`, wide: true, name: `${env.entity}-processes`,
+        sections: [...groups].sort((a, b) => a[0].localeCompare(b[0])).map(([title, rows]) => ({ title, columns: ['Name', 'State', 'Mode', 'ID'], rows })) });
+      return {};
+    },
+
+    async 'table-metadata'(env) {
+      needForm(env);
+      const data = await api(env, `EntityDefinitions(LogicalName='${env.entity}')/Attributes?$select=LogicalName,SchemaName,DisplayName,AttributeType,RequiredLevel,IsCustomAttribute,AttributeOf`);
+      const rows = data.value.filter((a) => !a.AttributeOf).sort((a, b) => a.LogicalName.localeCompare(b.LogicalName)).map((a) => {
+        const required = (a.RequiredLevel && a.RequiredLevel.Value) || 'None';
+        return [
+          safe(() => a.DisplayName.UserLocalizedLabel.Label, ''),
+          { text: a.LogicalName, mono: true },
+          { text: a.SchemaName, mono: true, dim: true },
+          a.AttributeType,
+          required === 'None' ? '' : { text: required === 'ApplicationRequired' ? 'Required' : required === 'SystemRequired' ? 'System' : 'Recommended', tag: '' },
+          a.IsCustomAttribute ? { text: 'custom', tag: 'on' } : '',
+        ];
+      });
+      ui().panel({ title: 'Table columns', subtitle: `${rows.length} columns on ${env.entity}`, wide: true, name: `${env.entity}-columns`,
+        sections: [{ columns: ['Display name', 'Logical name', 'Schema name', 'Type', 'Required', ''], rows }] });
+      return {};
+    },
+
+    'form-editor'(env) {
+      const form = needForm(env);
+      const formId = cleanId(safe(() => form.ui.formSelector.getCurrentItem().getId(), ''));
+      if (!formId) throw new Error('Could not find the ID of the current form.');
+      if (env.envId) return open(`https://make.powerapps.com/e/${env.envId}/s/${DEFAULT_SOLUTION}/entity/${env.entity}/form/edit/${formId}?source=powerappsportal`);
+      return open(`${env.clientUrl}/main.aspx?pagetype=formeditor&etn=${env.entity}&extraqs=${encodeURIComponent(`formtype=main&formId=${formId}`)}`);
+    },
+
+    // Navigate
+    'open-by-id'(env, args) {
+      const entity = entityArg(args);
+      const id = cleanId(String(args.id || '').trim());
+      if (!GUID.test(id)) throw new Error('That is not a valid record ID (GUID).');
+      return openRecord(env, entity, id);
+    },
+    'new-record': (env, args) => openRecord(env, entityArg(args), null),
+    'open-list': (env, args) => openList(env, entityArg(args)),
+    'my-profile'(env) {
+      if (!env.userId) throw new Error('Could not find the current user.');
+      return openRecord(env, 'systemuser', env.userId);
+    },
+    'advanced-find': (env) => open(`${env.clientUrl}/main.aspx?pagetype=advancedfind`),
+    'maker-portal': (env) => open(env.envId ? `https://make.powerapps.com/environments/${env.envId}/home` : 'https://make.powerapps.com/'),
+    'solutions': (env) => open(env.envId ? `https://make.powerapps.com/environments/${env.envId}/solutions`
+      : `${env.clientUrl}/tools/solution/home_solution.aspx?etc=7100`),
+    'admin-center': (env) => open(env.envId ? `https://admin.powerplatform.microsoft.com/environments/environment/${env.envId}/hub`
+      : 'https://admin.powerplatform.microsoft.com/environments'),
+
+    // Admin
+    'list-users': list('systemuser'),
+    'list-teams': list('team'),
+    'list-roles': list('role'),
+    'list-business-units': list('businessunit'),
+    'list-system-jobs': list('asyncoperation'),
+    'list-plugin-traces': list('plugintracelog'),
+    'list-processes': list('workflow'),
+    'list-env-variables': list('environmentvariabledefinition'),
+    'list-web-resources': list('webresource'),
+    'list-mailboxes': list('mailbox'),
+    'list-solution-history': list('msdyn_solutionhistory'),
+    'advanced-settings': (env) => open(`${env.clientUrl}/main.aspx?settingsonly=true`),
+
+    // Debug: documented URL switches of the Unified Interface.
+    'forms-monitor': () => reloadWith((p) => p.set('monitor', 'true')),
+    'command-checker': () => reloadWith((p) => p.set('ribbondebug', 'true')),
+    'perf-center': () => reloadWith((p) => p.set('perf', 'true')),
+    'disable-handlers': () => reloadWith((p) => setFlag(p, 'DisableFormHandlers', 'true')),
+    'disable-rules': () => reloadWith((p) => setFlag(p, 'DisableFormHandlers', 'businessrule')),
+    'disable-libraries': () => reloadWith((p) => setFlag(p, 'DisableFormLibraries', 'true')),
+    'dark-mode': () => reloadWith((p) => setFlag(p, 'themeOption', 'darkmode')),
+    'clear-flags': () => reloadWith((p) => ['flags', 'monitor', 'ribbondebug', 'perf'].forEach((k) => p.delete(k))),
+
+    // Tools
+    async 'env-info'(env) {
+      const { gc } = env;
+      const org = gc.organizationSettings || {};
+      const user = gc.userSettings || {};
+      const mono = (v) => ({ text: v, mono: true });
+      const rowsOf = (pairs) => pairs.filter(([, v]) => v != null && v !== '').map(([k, v, m]) => [k, m ? mono(v) : v]);
+      const app = await settle(Promise.resolve(safe(() => gc.getCurrentAppProperties())).catch(() => null), 2500);
+      const sections = [
+        { title: 'Environment', rows: rowsOf([
+          ['Organization', env.orgName], ['Organization ID', cleanId(org.organizationId), true], ['Environment ID', env.envId, true],
+          ['Version', env.version, true], ['URL', env.clientUrl, true], ['Web API', env.apiBase, true],
+          ['Region', org.organizationGeo], ['Base language', org.languageId], ['Base currency', safe(() => org.baseCurrency.name)],
+          ['Autosave', org.isAutoSaveEnabled == null ? null : org.isAutoSaveEnabled ? 'Enabled' : 'Disabled'],
+        ]) },
+        { title: 'User', rows: rowsOf([
+          ['Name', env.userName], ['User ID', env.userId, true], ['Language', user.languageId],
+          ['Security roles', safe(() => (user.roles.get ? user.roles.get() : user.roles).map((r) => r.name).filter(Boolean).join(', ')) || safe(() => user.securityRoles.length)],
+        ]) },
+        { title: 'App', rows: rowsOf([
+          ['Name', app && app.displayName], ['Unique name', app && app.uniqueName, true], ['App ID', app && cleanId(app.appId), true],
+          ['Client', safe(() => gc.client.getClient())], ['Form factor', safe(() => ({ 0: 'Unknown', 1: 'Desktop', 2: 'Tablet', 3: 'Phone' })[gc.client.getFormFactor()])],
+        ]) },
+      ].filter((s) => s.rows.length);
+      ui().panel({ title: 'Environment details', subtitle: env.clientUrl, name: 'environment', sections });
+      return {};
+    },
+
+    async 'my-roles'(env) {
+      if (!env.userId) throw new Error('Could not find the current user.');
+      const u = await api(env, `systemusers(${env.userId})?$select=fullname&$expand=systemuserroles_association($select=name,roleid),teammembership_association($select=name,teamid)`);
+      const row = (name, id) => [name, { text: id, mono: true, dim: true }];
+      const roles = (u.systemuserroles_association || []).map((r) => row(r.name, r.roleid)).sort((a, b) => a[0].localeCompare(b[0]));
+      const teams = (u.teammembership_association || []).map((t) => row(t.name, t.teamid)).sort((a, b) => a[0].localeCompare(b[0]));
+      ui().panel({ title: 'My roles and teams', subtitle: u.fullname || env.userName, name: 'my-roles', json: u,
+        sections: [
+          { title: `Security roles assigned directly (${roles.length})`, columns: ['Role', 'ID'], rows: roles },
+          { title: `Teams (${teams.length})`, columns: ['Team', 'ID'], rows: teams, note: teams.length ? 'Roles granted through a team apply on top of the direct ones.' : '' },
+        ] });
+      return {};
+    },
+
+    async 'record-count'(env, args) {
+      const entity = entityArg(args);
+      const data = await api(env, `RetrieveTotalRecordCount(EntityNames=@p)?@p=${encodeURIComponent(JSON.stringify([entity]))}`);
+      const c = data && data.EntityRecordCountCollection;
+      const i = c && c.Keys ? c.Keys.indexOf(entity) : -1;
+      if (i === -1) throw new Error(`No count available for "${entity}".`);
+      return { toast: `${Number(c.Values[i]).toLocaleString()} rows in ${entity} (Dataverse snapshot, refreshed about daily)`, kind: 'info' };
+    },
+
+    async 'api-playground'(env) {
+      const examples = ['WhoAmI', 'accounts?$select=name&$top=5', "EntityDefinitions(LogicalName='account')?$select=LogicalName,PrimaryNameAttribute"];
+      if (env.recordId) examples.unshift(await recordPath(env).catch(() => 'WhoAmI'));
+      ui().playground({
+        subtitle: `GET ${env.apiBase}/…`,
+        examples: [...new Set(examples)],
+        run: (query) => api(env, query.replace(/\s*[\r\n]+\s*/g, '')),
+      });
+      return {};
+    },
+
+    'web-api-root': (env) => open(`${env.apiBase}/`),
+    'diagnostics': (env) => open(`${env.clientUrl}/tools/diagnostics/diag.aspx`),
+  };
+
+  // ── Public API ──────────────────────────────────────────────────────────
+  function context() {
+    try {
+      const env = getEnv();
+      if (!env) return { dynamics: false };
+      const params = new URL(window.location.href).searchParams;
+      return {
+        dynamics: true,
+        origin: window.location.origin,
+        org: env.orgName,
+        version: env.version,
+        userName: env.userName,
+        form: !!env.form,
+        saved: !!env.recordId,
+        entity: env.entity,
+        recordId: env.recordId,
+        recordName: env.form ? display(safe(() => env.form.data.entity.getPrimaryAttributeValue())) : '',
+        flags: ['flags', 'monitor', 'ribbondebug', 'perf'].some((k) => params.has(k)),
+      };
+    } catch {
+      return { dynamics: false };
+    }
+  }
+
+  async function run(id, args, opts) {
+    try {
+      if (opts && opts.theme) ui().setTheme(opts.theme);
+      const handler = Object.prototype.hasOwnProperty.call(handlers, id) ? handlers[id] : null;
+      if (!handler) throw new Error(`Unknown command: ${id}`);
+      const env = getEnv();
+      if (!env) throw new Error('This page is not a Dynamics 365 / Power Apps model-driven app.');
+      return { ok: true, ...((await handler(env, args || {})) || {}) };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  }
+
+  async function entities() {
+    try {
+      const env = getEnv();
+      if (!env) return { ok: false, error: 'Not a Dynamics 365 page.' };
+      if (!state.entities) {
+        const data = await api(env, 'EntityDefinitions?$select=LogicalName,DisplayName,EntitySetName');
+        state.entities = data.value.map((e) => {
+          state.sets.set(e.LogicalName, e.EntitySetName);
+          return { name: e.LogicalName, label: safe(() => e.DisplayName.UserLocalizedLabel.Label, '') };
+        }).sort((a, b) => a.name.localeCompare(b.name));
+      }
+      return { ok: true, list: state.entities };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  }
+
+  async function searchUsers(text) {
+    try {
+      const env = getEnv();
+      if (!env) return { ok: false, error: 'Not a Dynamics 365 page.' };
+      const q = encodeURIComponent(String(text || '').trim().replace(/'/g, "''"));
+      const filter = `isdisabled eq false${q ? ` and (contains(fullname,'${q}') or contains(internalemailaddress,'${q}'))` : ''}`;
+      const query = (cols) => api(env, `systemusers?$select=${cols}&$filter=${filter}&$orderby=fullname&$top=8`);
+      let data;
+      try {
+        data = await query('fullname,internalemailaddress,azureactivedirectoryobjectid');
+      } catch {
+        data = await query('fullname,internalemailaddress'); // on-premises has no Entra object id
+      }
+      return { ok: true, users: data.value.map((u) => ({
+        id: u.systemuserid, name: u.fullname || '(no name)', email: u.internalemailaddress || '', aad: u.azureactivedirectoryobjectid || '',
+      })) };
+    } catch (err) {
+      return { ok: false, error: String((err && err.message) || err) };
+    }
+  }
+
+  function notify(message, kind, theme) {
+    if (theme) ui().setTheme(theme);
+    ui().toast(message, kind || 'ok');
+  }
+
+  window.__level67 = { version: VERSION, context, run, entities, searchUsers, notify, commands: Object.keys(handlers) };
+})();
