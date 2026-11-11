@@ -1,0 +1,27 @@
+{
+  "name": "crm-level67",
+  "version": "1.0.0",
+  "description": "Level 67 - a command palette of power tools for Dynamics 365 / Power Apps (Chrome and Firefox extension).",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test \"test/*.test.mjs\"",
+    "preview": "node scripts/preview.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "lint:firefox": "npm run build && npx --yes web-ext lint --source-dir dist/firefox",
+    "test:e2e": "node test/e2e/chrome.e2e.mjs",
+    "test:e2e:firefox": "node test/e2e/firefox.e2e.mjs",
+    "test:all": "npm test && npm run test:e2e && npm run test:e2e:firefox"
+  },
+  "devDependencies": {
+    "lucide-static": "^1.72.0",
+    "puppeteer": "^25.17.0",
+    "selenium-webdriver": "^4.51.0",
+    "sharp": "^0.35.5"
+  }
+}
