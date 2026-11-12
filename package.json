@@ -1,6 +1,6 @@
 {
   "name": "crm-level67",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Level 67 - a command palette of power tools for Dynamics 365 / Power Apps (Chrome and Firefox extension).",
   "private": true,
   "type": "module",

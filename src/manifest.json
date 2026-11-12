@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Level 67 for Dynamics 365 / Power Apps",
   "short_name": "Level 67",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A command palette of power tools for Dynamics 365 and Power Apps: logical names, god mode, impersonation, Web API and more.",
   "homepage_url": "https://github.com/Purgator/CrmLevel67",
   "icons": {

@@ -52,7 +52,7 @@ It is inspired by the excellent [Level up for Dynamics 365/Power Apps](https://g
 
 | Command | What it does |
 |---|---|
-| Show logical names | Shows each field's logical name as a chip under its label (click to copy), and on tabs and sections |
+| Show logical names | Shows each field's logical name as a chip under its label (click to copy), and on tabs and sections. Works in the Unified Interface and in the classic web client |
 | God mode | Shows hidden fields, tabs and sections, unlocks read-only fields, lifts required flags |
 | Changed fields | Lists the fields with unsaved changes |
 | Fill required fields | Puts placeholder values in empty mandatory fields (lookups are left to you) |
@@ -130,7 +130,7 @@ In the side panel: type to filter, click a cell to copy it, `Esc` to close.
 
 ![Settings panel](docs/settings.png)
 
-**Impersonation.** Run *Impersonate a user*, search by name or email, pick someone. The tab reloads and from then on the server reads and saves data as that user: *Modified by* shows them, with you as the delegate. The page header keeps your own name, because the app loaded it before. The toolbar icon shows an **AS** badge on the tabs of that environment only. Open the palette to see **Acting as …** with **confirmed** next to it once the server itself answers as that user (*My user record* and *My roles and teams* follow the impersonated user too), and press **Stop** to return to yourself. It ends by itself when you close the browser. You need the *Act on Behalf of Another User* privilege, which System Administrators have. On an on-premises address, the browser asks you once for access to that site.
+**Impersonation.** Run *Impersonate a user*, search by name or email, pick someone. The tab reloads and from then on the server reads and saves data as that user: *Modified by* shows them, with you as the delegate. The page header keeps your own name, because the app loaded it before. The toolbar icon shows an **AS** badge on the tabs of that environment only. Open the palette to see **Acting as …** with **confirmed** next to it once the server itself answers as that user (*My user record* and *My roles and teams* follow the impersonated user too), and press **Stop** to return to yourself. In the classic web client (the older interface, still common on-premises) forms load and save outside the Web API, so only Web API calls run as the chosen user there; the banner then reads **Web API only**. Use a Unified Interface app for the full effect. It ends by itself when you close the browser. You need the *Act on Behalf of Another User* privilege, which System Administrators have. On an on-premises address, the browser asks you once for access to that site.
 
 ## Permissions and privacy
 

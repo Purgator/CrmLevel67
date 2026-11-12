@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.1
+
+- Classic web client (forms in a frame, as on many on-premises organisations): logical name chips and blur now work there.
+- Blur also covers two-option fields and header fields in the Unified Interface, and no longer keeps anything running in the page.
+- The impersonation check asks the server through a data query, because `WhoAmI` ignores impersonation on some versions and reported "not applied" wrongly.
+- In the classic web client the menu says that impersonation only covers Web API calls there.
+- The page scripts are loaded once per page instead of at every opening of the menu.
+
 ## 1.0.0
 
 First release.

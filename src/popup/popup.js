@@ -44,6 +44,10 @@ function h(tag, props, ...kids) {
 
 // ── Page bridge ───────────────────────────────────────────────────────────
 async function inject() {
+  // Already there from an earlier opening on this page: nothing to load again.
+  const [probe] = await api.scripting.executeScript({ target: { tabId: state.tab.id }, world: 'MAIN',
+    func: () => (window.__level67 && window.__level67ui && window.__level67.version === window.__level67ui.version ? window.__level67.version : '') });
+  if (probe && probe.result === api.runtime.getManifest().version) return;
   await api.scripting.executeScript({ target: { tabId: state.tab.id }, world: 'MAIN', files: ['/page/ui.js', '/page/engine.js'] }); // absolute: Firefox resolves relative paths against the popup's folder
 }
 async function call(method, ...args) {
@@ -437,6 +441,7 @@ function showImpersonate() {
     h('p', null, 'Pick a user and the app reloads. From then on the server reads and saves data as them: "Modified by" shows them, with you as the delegate.'
       + ' The page header keeps your own name. You need the "Act on behalf of another user" privilege (System Administrators have it).'),
     h('div', { class: 'field' }, h('label', { for: 'f-user' }, 'User'), input),
+    state.ctx.classic && h('p', { class: 'warn' }, 'This is the classic web client: its forms load and save outside the Web API, so only Web API calls (scripts, this extension) run as the chosen user. Use a Unified Interface app for the full effect.'),
     results));
   results.replaceChildren(h('div', { class: 'muted' }, 'Searching…'));
   input.focus();
@@ -481,7 +486,9 @@ async function checkImpersonation() {
   if (!who || !who.ok) {
     state.imp.check = { state: 'error', label: 'refused', detail: (who && who.error) || 'The server did not answer.' };
   } else if (who.userId === user.id.toLowerCase()) {
-    state.imp.check = { state: 'ok', label: 'confirmed', detail: 'The server answers as this user.' };
+    state.imp.check = state.ctx.classic
+      ? { state: 'ok', label: 'Web API only', detail: 'Classic web client: its forms load and save outside the Web API, so they still run as you. Open the record in a Unified Interface app to work as this user.' }
+      : { state: 'ok', label: 'confirmed', detail: 'The server reads and saves data as this user.' };
   } else {
     state.imp.check = { state: 'off', label: 'not applied', detail: 'The server still answers as you. Stop, reload the page and try again.' };
   }

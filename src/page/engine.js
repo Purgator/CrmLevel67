@@ -9,21 +9,29 @@
 // Every result is plain JSON so it can cross the extension boundary.
 (() => {
   'use strict';
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   if (window.__level67 && window.__level67.version === VERSION) return;
 
   const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const FORMATTED = '@OData.Community.Display.V1.FormattedValue';
   const LOOKUP_TYPE = '@Microsoft.Dynamics.CRM.lookuplogicalname';
   const DEFAULT_SOLUTION = 'fd140aaf-4df4-11dd-bd17-0019b9312238';
-  // Values worth hiding in a screenshot: field inputs, lookups, grid cells, record title, people.
-  const BLUR = 'input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]):not([type="search"]), textarea, select,'
-    + ' [role="gridcell"], [role="combobox"], [role="textbox"], [contenteditable="true"], .ag-cell,'
-    + ' [data-id="header_title"], [data-id$="selected_tag_text"], [data-id$="_selected_tag"],'
-    + ' [data-id*="fieldControl"] a, [data-id*="fieldControl"] [role="link"], [role="presentation"] > img,'
-    + ' .ms-Persona-primaryText, .ms-Persona-secondaryText';
-  const BLURRED = 'data-l67-blur';
-  const FIELD_LABEL = '[id$="-field-label"]'; // how the Unified Interface ids the label of a form field
+  // Values worth hiding in a screenshot: field values, lookups, grid cells, record title, header fields, people.
+  const BLUR = [
+    // Unified Interface
+    'input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]):not([type="search"])', 'textarea', 'select',
+    '[role="gridcell"]', '[role="combobox"]', '[role="textbox"]', '[contenteditable="true"]', '.ag-cell',
+    '[data-id="header_title"]', '[id^="headerControlsList"] > div > div:first-child',
+    '[data-id$="selected_tag_text"]', '[data-id$="_selected_tag"]', '[data-id$=".fieldControl-checkbox-container"]',
+    '[data-id*="fieldControl"] a', '[data-id*="fieldControl"] [role="link"]', '[role="presentation"] > img',
+    '.ms-Persona-primaryText', '.ms-Persona-secondaryText',
+    // Classic web client
+    '.ms-crm-Inline-Value', '#FormTitle h1', '.ms-crm-List-DataCell',
+  ].join(', ');
+  // How each client marks the label of a form field: an id ending in
+  // "<control>-field-label" (Unified Interface) or a cell with id "<control>_c" (classic).
+  const FIELD_LABEL = '[id$="-field-label"]';
+  const CLASSIC_LABEL = '.ms-crm-InlineEditLabel';
   const state = { logical: null, blur: null, entities: null, sets: new Map() };
   const ui = () => window.__level67ui;
 
@@ -130,38 +138,48 @@
   const attrLabel = (attr) => safe(() => attr.controls.get(0).getLabel(), '') || attr.getName();
   const open = (url) => ({ open: url });
 
-  // This document plus the same-origin frames (the legacy web client keeps forms in one).
+  // This document plus its same-origin frames, nested ones included (the
+  // classic web client keeps the form in a frame).
   function docs() {
-    const out = [document];
-    try {
-      for (let i = 0; i < window.frames.length; i++) {
-        try { if (window.frames[i].document) out.push(window.frames[i].document); } catch { /* cross-origin frame */ }
-      }
-    } catch { /* ignore */ }
+    const out = [];
+    const walk = (win, depth) => {
+      try { if (win.document && !out.includes(win.document)) out.push(win.document); } catch { return; /* cross-origin frame */ }
+      if (depth >= 3) return;
+      try { for (let i = 0; i < win.frames.length; i++) walk(win.frames[i], depth + 1); } catch { /* ignore */ }
+    };
+    walk(window, 0);
     return out;
   }
 
-  // Adds CSS to a document and returns a function that removes it. Both a
-  // constructed sheet and a <style> element: pages can drop one or block the other.
+  // Adds CSS to a document and returns a function that removes it. A <style>
+  // element when the page allows one, a constructed sheet otherwise.
   function addCss(doc, css) {
-    const undo = [];
-    try {
-      const sheet = new (doc.defaultView || window).CSSStyleSheet();
-      sheet.replaceSync(css);
-      doc.adoptedStyleSheets = [...doc.adoptedStyleSheets, sheet];
-      undo.push(() => { doc.adoptedStyleSheets = doc.adoptedStyleSheets.filter((x) => x !== sheet); });
-    } catch { /* no constructable stylesheets here */ }
     try {
       const style = doc.createElement('style');
       style.textContent = css;
       (doc.head || doc.documentElement).append(style);
-      undo.push(() => style.remove());
-    } catch { /* blocked by the page */ }
-    return () => undo.forEach((fn) => safe(fn));
+      if (style.sheet && style.sheet.cssRules.length) return () => style.remove();
+      style.remove(); // blocked by the page's content security policy
+    } catch { /* no DOM to speak of */ }
+    try {
+      const sheet = new (doc.defaultView || window).CSSStyleSheet();
+      sheet.replaceSync(css);
+      doc.adoptedStyleSheets = [...doc.adoptedStyleSheets, sheet];
+      return () => { doc.adoptedStyleSheets = doc.adoptedStyleSheets.filter((x) => x !== sheet); };
+    } catch { /* no constructable stylesheets here */ }
+    return () => {};
   }
 
-  // The user the server answers as: the impersonated one while impersonating.
+  // The user the server reads and writes data as: the impersonated one while
+  // impersonating. Asked through a query, because WhoAmI itself ignores
+  // impersonation on some versions.
   async function effectiveUserId(env) {
+    try {
+      const me = await api(env, "systemusers?$select=systemuserid&$filter=Microsoft.Dynamics.CRM.EqualUserId(PropertyName='systemuserid')");
+      if (me.value && me.value[0]) return cleanId(me.value[0].systemuserid);
+    } catch (err) {
+      if (/privilege|prvActOnBehalfOfAnotherUser|0x80040220|0x8004/i.test(String(err && err.message))) throw err; // an impersonation the server refuses
+    }
     const who = await api(env, 'WhoAmI').catch(() => null);
     return cleanId(who && who.UserId) || env.userId;
   }
@@ -233,20 +251,21 @@
         if (name && /^[\w.-]+$/.test(name) && /^[\w.-]+$/.test(logical)) fields.push([name, logical]);
       }));
       fields.sort((a, b) => a[0].length - b[0].length); // "name" also ends "firstname": the longer rule must win
-      const targets = docs().filter((doc) => safe(() => doc.querySelector(FIELD_LABEL), null));
+      const targets = docs().filter((doc) => safe(() => doc.querySelector(`${FIELD_LABEL}, ${CLASSIC_LABEL}`), null));
       if (targets.length && fields.length) {
+        const chip = 'display: block; width: fit-content; max-width: 100%; box-sizing: border-box; margin: 3px 0 2px; padding: 1px 7px;'
+          + ' border-radius: 6px; background: #4a2fd0; color: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25);'
+          + ' font: 600 11.5px/1.55 "Cascadia Code", Consolas, ui-monospace, monospace; letter-spacing: 0; text-transform: none;'
+          + ' white-space: normal; overflow-wrap: anywhere; cursor: copy;';
         const css = `${FIELD_LABEL} { display: block !important; height: auto !important; max-height: none !important; overflow: visible !important;`
           + ' white-space: normal !important; text-overflow: clip !important; cursor: copy; }'
           + `:has(> ${FIELD_LABEL}) { overflow: visible !important; height: auto !important; max-height: none !important; }`
-          + `${FIELD_LABEL}::after { display: block; width: fit-content; max-width: 100%; box-sizing: border-box; margin: 3px 0 2px; padding: 1px 7px;`
-          + ' border-radius: 6px; background: #4a2fd0; color: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25);'
-          + ' font: 600 11.5px/1.55 "Cascadia Code", Consolas, ui-monospace, monospace; letter-spacing: 0; text-transform: none;'
-          + ' white-space: normal; overflow-wrap: anywhere; }'
-          + fields.map(([name, logical]) => `[id$="${name}-field-label"]::after { content: "${logical}"; }`).join('');
+          + `${FIELD_LABEL}::after, [id$="_c"]::after { ${chip} }`
+          + fields.map(([name, logical]) => `[id$="${name}-field-label"]::after, [id="${name}_c"]::after { content: "${logical}"; }`).join('');
         const onClick = (e) => {
-          const label = safe(() => e.target.closest(FIELD_LABEL), null);
+          const label = safe(() => e.target.closest(`${FIELD_LABEL}, td[id$="_c"]`), null);
           if (!label) return;
-          const hit = fields.filter(([name]) => label.id.endsWith(`${name}-field-label`)).pop();
+          const hit = fields.filter(([name]) => label.id === `${name}_c` || label.id.endsWith(`${name}-field-label`)).pop();
           if (!hit) return;
           Promise.resolve(ui().copy(hit[1])).then((ok) => ui().toast(ok ? `Copied: ${hit[1]}` : 'Could not copy to the clipboard', ok ? 'ok' : 'error'));
         };
@@ -467,40 +486,11 @@
         state.blur = null;
         return { toast: 'Blur removed' };
       }
-      // Inline styles, re-applied as the page renders: no stylesheet for the app to drop or override.
-      const apply = () => {
-        let n = 0;
-        for (const doc of docs()) {
-          for (const el of safe(() => [...doc.querySelectorAll(BLUR)], [])) {
-            n++;
-            if (el.hasAttribute(BLURRED)) continue;
-            el.style.setProperty('filter', 'blur(5px)', 'important');
-            el.setAttribute(BLURRED, '');
-          }
-        }
-        return n;
-      };
-      const count = apply();
-      const observers = [];
-      let timer = null;
-      const later = () => { if (!timer) timer = setTimeout(() => { timer = null; apply(); }, 150); };
-      for (const doc of docs()) {
-        safe(() => {
-          const observer = new (doc.defaultView || window).MutationObserver(later);
-          observer.observe(doc.documentElement, { childList: true, subtree: true });
-          observers.push(observer);
-        });
-      }
-      state.blur = { off() {
-        observers.forEach((o) => o.disconnect());
-        clearTimeout(timer);
-        for (const doc of docs()) {
-          for (const el of safe(() => [...doc.querySelectorAll(`[${BLURRED}]`)], [])) {
-            el.style.removeProperty('filter');
-            el.removeAttribute(BLURRED);
-          }
-        }
-      } };
+      // One rule per document, frames included: the form of the classic client lives in one.
+      const all = docs();
+      const count = all.reduce((n, doc) => n + safe(() => doc.querySelectorAll(BLUR).length, 0), 0);
+      const undo = all.map((doc) => addCss(doc, `${BLUR} { filter: blur(5px) !important; }`));
+      state.blur = { off: () => undo.forEach((fn) => safe(fn)) };
       return count ? { toast: `${count} values blurred. Run again to remove.` }
         : { toast: 'Blur is on, but this page shows no value yet. Run again to remove.', kind: 'info' };
     },
@@ -563,7 +553,7 @@
     'new-record': (env, args) => openRecord(env, entityArg(args), null),
     'open-list': (env, args) => openList(env, entityArg(args)),
     async 'my-profile'(env) {
-      const id = await effectiveUserId(env);
+      const id = await effectiveUserId(env).catch(() => env.userId);
       if (!id) throw new Error('Could not find the current user.');
       return openRecord(env, 'systemuser', id);
     },
@@ -683,6 +673,7 @@
         recordId: env.recordId,
         recordName: env.form ? display(safe(() => env.form.data.entity.getPrimaryAttributeValue())) : '',
         flags: ['flags', 'monitor', 'ribbondebug', 'perf'].some((k) => params.has(k)),
+        classic: !!safe(() => document.querySelector('iframe[id^="contentIFrame"]'), null),
       };
     } catch {
       return { dynamics: false };
@@ -745,8 +736,7 @@
     try {
       const env = getEnv();
       if (!env) return { ok: false, error: 'Not a Dynamics 365 page.' };
-      const who = await api(env, 'WhoAmI');
-      return { ok: true, userId: cleanId(who.UserId), pageUserId: env.userId };
+      return { ok: true, userId: await effectiveUserId(env), pageUserId: env.userId };
     } catch (err) {
       return { ok: false, error: String((err && err.message) || err) };
     }

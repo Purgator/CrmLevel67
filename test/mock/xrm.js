@@ -201,6 +201,7 @@
     if (resource === `systemusers(${USER_ID})`) return { fullname: 'Sam Admin', systemuserid: USER_ID,
       systemuserroles_association: [{ name: 'System Administrator', roleid: 'd0000000-0000-4000-8000-000000000001' }, { name: 'Salesperson', roleid: 'd0000000-0000-4000-8000-000000000002' }],
       teammembership_association: [{ name: 'Contoso HQ', teamid: 'e0000000-0000-4000-8000-000000000001' }] };
+    if (resource === 'systemusers' && q.includes('EqualUserId')) return { value: [{ systemuserid: USER_ID }] };
     if (resource === 'systemusers') {
       const needle = ((/contains\(fullname,'(.*?)'\)/.exec(q) || [])[1] || '').replace(/''/g, "'").toLowerCase();
       return { value: USERS.filter((u) => !needle || u.fullname.toLowerCase().includes(needle) || u.internalemailaddress.includes(needle)) };
@@ -220,8 +221,9 @@
     if (at === -1) return realFetch(input, init);
     const path = url.slice(url.indexOf('/', at + 10) + 1);
     const body = route(path);
-    // Hosts that can tell who is impersonated (preview, end-to-end tests) answer WhoAmI as that user.
-    if (path === 'WhoAmI' && typeof window.__mock.effectiveUser === 'function') body.UserId = (await window.__mock.effectiveUser()) || body.UserId;
+    // Hosts that can tell who is impersonated (preview, end-to-end tests) answer the
+    // "current user" query as that user. WhoAmI keeps answering as the real one, as some versions do.
+    if (path.includes('EqualUserId') && typeof window.__mock.effectiveUser === 'function') body.value[0].systemuserid = (await window.__mock.effectiveUser()) || USER_ID;
     const json = body || { error: { code: '0x80060888', message: `Resource not found for the segment '${url.split('/').pop().split('?')[0]}'.` } };
     return { ok: !!body, status: body ? 200 : 404, json: async () => json };
   };

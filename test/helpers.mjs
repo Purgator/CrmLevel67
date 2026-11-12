@@ -31,8 +31,8 @@ export function createPage({ mock = true, href = 'https://contoso.crm4.dynamics.
     CSSStyleSheet: class { replaceSync(css) { this.css = css; } },
     document: {
       adoptedStyleSheets: [],
-      querySelectorAll: (selector) => (selector.startsWith('[data-l67-blur') ? page.elements.filter((e) => e.hasAttribute('data-l67-blur')) : page.elements),
-      querySelector: (selector) => (fieldLabels && selector === '[id$="-field-label"]' ? {} : null),
+      querySelectorAll: () => page.elements,
+      querySelector: (selector) => (fieldLabels && selector.includes('-field-label') ? {} : null),
       addEventListener: (type, fn) => page.listeners.add(fn),
       removeEventListener: (type, fn) => page.listeners.delete(fn),
     },

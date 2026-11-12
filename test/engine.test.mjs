@@ -16,7 +16,7 @@ test('context describes a saved record', () => {
   const ctx = createPage().engine.context();
   assert.deepEqual(JSON.parse(JSON.stringify(ctx)), {
     dynamics: true, origin: 'https://contoso.crm4.dynamics.com', org: 'contoso-dev', version: '9.2.26103.165', userName: 'Sam Admin',
-    form: true, saved: true, entity: 'account', recordId: ID, recordName: 'Contoso Ltd', flags: false,
+    form: true, saved: true, entity: 'account', recordId: ID, recordName: 'Contoso Ltd', flags: false, classic: false,
   });
 });
 
@@ -50,7 +50,7 @@ test('logical names are drawn as chips under the field labels', async () => {
   const res = await ok(page, 'logical-names');
   assert.match(res.toast, /shown on \d+ fields/);
   const [sheet] = page.window.document.adoptedStyleSheets;
-  assert.ok(sheet.css.includes('[id$="name-field-label"]::after { content: "name"; }'));
+  assert.ok(sheet.css.includes('[id$="name-field-label"]::after, [id="name_c"]::after { content: "name"; }'), 'one rule covers both clients');
   assert.ok(sheet.css.indexOf('"name-field-label"') < sheet.css.indexOf('"accountnumber-field-label"'), 'shorter names first, so the longer rule wins');
   assert.equal(control(page, 'name').getLabel(), 'Account Name', 'field labels themselves are left alone');
   assert.equal(page.xrm.Page.ui.tabs.get(0).getLabel(), 'Summary ⟨SUMMARY_TAB⟩');
@@ -177,13 +177,13 @@ test('refresh subgrids and refresh form', async () => {
   assert.equal(attr(page, 'name').getIsDirty(), false);
 });
 
-test('blur marks every value, and removes the marks again', async () => {
-  const elements = [fakeElement(), fakeElement(), fakeElement()];
-  const page = createPage({ elements });
+test('blur adds one rule to the page, and removes it again', async () => {
+  const page = createPage({ elements: [fakeElement(), fakeElement(), fakeElement()] });
   assert.equal((await ok(page, 'blur-data')).toast, '3 values blurred. Run again to remove.');
-  assert.ok(elements.every((e) => e.style.get('filter') === 'blur(5px) !important' && e.hasAttribute('data-l67-blur')));
+  const [sheet] = page.window.document.adoptedStyleSheets;
+  assert.match(sheet.css, /\.ms-crm-Inline-Value.*\{ filter: blur\(5px\) !important; \}/);
   assert.equal((await ok(page, 'blur-data')).toast, 'Blur removed');
-  assert.ok(elements.every((e) => e.style.get('filter') === undefined && !e.hasAttribute('data-l67-blur')));
+  assert.equal(page.window.document.adoptedStyleSheets.length, 0);
 });
 
 test('blur says so when the page shows nothing to blur', async () => {

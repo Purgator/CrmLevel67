@@ -4,7 +4,7 @@
 // is untrusted and some hosts enforce Trusted Types.
 (() => {
   'use strict';
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   if (window.__level67ui && window.__level67ui.version === VERSION) return;
 
   const CSS = `
