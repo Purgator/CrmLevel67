@@ -181,7 +181,7 @@
     if ((m = /^EntityDefinitions\(LogicalName='(\w+)'\)(\/Attributes)?$/.exec(resource))) {
       const entity = ENTITIES.find((e) => e[0] === m[1]);
       if (!entity) return null;
-      if (!m[2]) return { LogicalName: entity[0], EntitySetName: entity[2], PrimaryNameAttribute: 'name' };
+      if (!m[2]) return { LogicalName: entity[0], EntitySetName: entity[2], PrimaryNameAttribute: 'name', PrimaryIdAttribute: `${entity[0]}id` };
       return { value: [
         ...FIELDS.map((f) => ({ LogicalName: f.name, SchemaName: f.name[0].toUpperCase() + f.name.slice(1), DisplayName: label(f.label),
           AttributeType: f.type[0].toUpperCase() + f.type.slice(1), RequiredLevel: { Value: f.required === 'required' ? 'ApplicationRequired' : 'None' },

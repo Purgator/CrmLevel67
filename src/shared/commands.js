@@ -3,7 +3,8 @@
 //
 //   needs: 'form'  -> a record form must be open
 //          'saved' -> the open record must already exist (has an id)
-//   input: fields the popup asks for before running ('entity' | 'guid' | 'text')
+//   input: fields the popup asks for before running ('entity' | 'guid' | 'ids' | 'text')
+//   modes: optional switch between sets of those fields (see open-by-id)
 //   view:  a dedicated popup screen instead of a direct run ('impersonate')
 
 export const CATEGORIES = [
@@ -55,8 +56,16 @@ export const COMMANDS = [
 
   // ── Navigate ──────────────────────────────────────────────────────────
   { id: 'open-by-id', cat: 'navigate', icon: 'search', title: 'Open record by ID',
-    desc: 'Jump to any record from its table and GUID', keywords: 'guid find go',
-    input: [ENTITY, { name: 'id', type: 'guid', label: 'Record ID', placeholder: '00000000-0000-0000-0000-000000000000' }] },
+    desc: 'By GUID, a random one, or a list of IDs', keywords: 'guid find go random several many range list batch',
+    input: [ENTITY,
+      { name: 'id', type: 'guid', label: 'Record ID', placeholder: '00000000-0000-0000-0000-000000000000' },
+      { name: 'ids', type: 'ids', label: 'Record IDs', placeholder: 'One GUID per line, or separated by commas' }],
+    // The popup offers these as a switch; each mode shows only its own fields and sends `mode` to the engine.
+    modes: [
+      { id: 'one', label: 'One ID', fields: ['entity', 'id'], submit: 'Open record' },
+      { id: 'random', label: 'Random', fields: ['entity'], submit: 'Open a random record' },
+      { id: 'many', label: 'Several', fields: ['entity', 'ids'], submit: 'Open records' },
+    ] },
   { id: 'new-record', cat: 'navigate', icon: 'plus', title: 'New record',
     desc: 'Open a blank form for any table', keywords: 'create add', input: [ENTITY] },
   { id: 'open-list', cat: 'navigate', icon: 'list', title: 'Open table list',

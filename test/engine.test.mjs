@@ -237,6 +237,38 @@ test('navigation commands validate input', async () => {
   assert.match((await page.run('open-list', { entity: 'nope' })).error, /does not exist/);
 });
 
+test('open by id can pick a random record', async () => {
+  const page = createPage();
+  const res = await ok(page, 'open-by-id', { entity: 'account', mode: 'random' });
+  assert.match(page.mock.log.at(-1), /^openForm \{"entityName":"account","entityId":"(a1b2c3d4-0000-4000-8000-00000000006[78])"\}$/);
+  assert.match(res.toast, /random account/);
+  assert.match((await page.run('open-by-id', { entity: 'nope', mode: 'random' })).error, /./);
+});
+
+test('open by id takes a list of ids separated by commas or lines', async () => {
+  const page = createPage();
+  const other = 'a1b2c3d4-0000-4000-8000-000000000068';
+  const res = await ok(page, 'open-by-id', { entity: 'account', mode: 'many', ids: `${ID},\n{${other.toUpperCase()}} ; ${ID}` });
+  assert.deepEqual(plain(res.open), ['ID', 'other'].map((k) => `https://contoso.crm4.dynamics.com/main.aspx?appid=abc123&pagetype=entityrecord&etn=account&id=${k === 'ID' ? ID : other}`));
+  assert.match((await page.run('open-by-id', { entity: 'account', mode: 'many', ids: `${ID}, nope` })).error, /Not a valid GUID: nope/);
+  assert.match((await page.run('open-by-id', { entity: 'account', mode: 'many', ids: ' ' })).error, /at least one/);
+  const lines = Array.from({ length: 21 }, (_, i) => `a1b2c3d4-0000-4000-8000-${String(i).padStart(12, '0')}`).join('\n');
+  assert.match((await page.run('open-by-id', { entity: 'account', mode: 'many', ids: lines })).error, /at most 20/);
+  await ok(page, 'open-by-id', { entity: 'account', mode: 'many', ids: ID }); // a single id opens in place
+  assert.equal(page.mock.log.at(-1), `openForm {"entityName":"account","entityId":"${ID}"}`);
+});
+
+test('records and lists open as links when the new tab setting is on', async () => {
+  const page = createPage();
+  const base = 'https://contoso.crm4.dynamics.com/main.aspx?appid=abc123&pagetype=';
+  assert.equal((await page.run('open-by-id', { entity: 'account', id: ID }, { openIn: 'new' })).open, `${base}entityrecord&etn=account&id=${ID}`);
+  assert.equal((await page.run('open-list', { entity: 'lead' }, { openIn: 'new' })).open, `${base}entitylist&etn=lead`);
+  assert.equal((await page.run('new-record', { entity: 'contact' }, { openIn: 'new' })).open, `${base}entityrecord&etn=contact`);
+  const before = page.mock.log.length;
+  await page.run('list-users', {}, { openIn: 'current' });
+  assert.equal(page.mock.log.length, before + 1);
+});
+
 test('admin shortcuts open the right tables', async () => {
   const page = createPage();
   const expected = { 'list-users': 'systemuser', 'list-teams': 'team', 'list-roles': 'role', 'list-business-units': 'businessunit',

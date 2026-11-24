@@ -53,6 +53,6 @@ export function createPage({ mock = true, href = 'https://contoso.crm4.dynamics.
   page.engine = sandbox.__level67;
   page.mock = sandbox.__mock;
   page.xrm = sandbox.Xrm;
-  page.run = (id, args) => page.engine.run(id, args, { theme: 'dark' });
+  page.run = (id, args, opts) => page.engine.run(id, args, { theme: 'dark', ...opts });
   return page;
 }

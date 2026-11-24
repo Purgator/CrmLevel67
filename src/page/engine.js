@@ -30,6 +30,8 @@
   ].join(', ');
   // How each client marks the label of a form field: an id ending in
   // "<control>-field-label" (Unified Interface) or a cell with id "<control>_c" (classic).
+  const MAX_OPEN = 20; // records opened at once from a list of IDs
+  const RANDOM_POOL = 5000; // records a "random record" draws from
   const FIELD_LABEL = '[id$="-field-label"]';
   const CLASSIC_LABEL = '.ms-crm-InlineEditLabel';
   const state = { logical: null, blur: null, entities: null, sets: new Map() };
@@ -129,6 +131,25 @@
     return meta.EntitySetName;
   }
 
+  // A random record of a table: one of the first RANDOM_POOL it can read, so a huge table is not fully random.
+  async function randomId(env, entity) {
+    const meta = await api(env, `EntityDefinitions(LogicalName='${entity}')?$select=EntitySetName,PrimaryIdAttribute`);
+    const idAttr = meta.PrimaryIdAttribute || `${entity}id`;
+    const data = await api(env, `${meta.EntitySetName}?$select=${idAttr}&$top=${RANDOM_POOL}`);
+    const ids = data.value.map((r) => cleanId(r[idAttr])).filter(Boolean);
+    if (!ids.length) throw new Error(`There is no record to open in "${entity}".`);
+    return ids[Math.floor(Math.random() * ids.length)];
+  }
+
+  // IDs separated by commas, semicolons, spaces or new lines; braces are fine, duplicates are dropped.
+  function parseIds(text) {
+    const tokens = String(text || '').split(/[\s,;]+/).filter(Boolean).map(cleanId);
+    if (!tokens.length) throw new Error('Enter at least one record ID.');
+    const bad = tokens.filter((t) => !GUID.test(t));
+    if (bad.length) throw new Error(`Not a valid GUID: ${bad.slice(0, 3).join(', ')}${bad.length > 3 ? ` (+${bad.length - 3} more)` : ''}`);
+    return [...new Set(tokens)];
+  }
+
   async function recordPath(env) {
     return `${await entitySet(env, env.entity)}(${env.recordId})`;
   }
@@ -207,7 +228,14 @@
     params.set('flags', [...flags].map(([k, v]) => `${k}=${v}`).join(','));
   }
 
+  // A link to a table list or a record, in the app the user is in. The popup
+  // opens it in a new tab, which is what the "open in new tab" setting asks for.
+  function pageUrl(env, type, entity, id) {
+    const appId = new URL(window.location.href).searchParams.get('appid');
+    return `${env.clientUrl}/main.aspx?${appId ? `appid=${appId}&` : ''}pagetype=${type}&etn=${entity}${id ? `&id=${id}` : ''}`;
+  }
   async function openList(env, entity) {
+    if (env.openIn === 'new') return open(pageUrl(env, 'entitylist', entity));
     const nav = env.xrm.Navigation;
     if (nav && nav.navigateTo) {
       await settle(nav.navigateTo({ pageType: 'entitylist', entityName: entity }));
@@ -216,6 +244,7 @@
     return open(`${env.clientUrl}/main.aspx?pagetype=entitylist&etn=${entity}`);
   }
   async function openRecord(env, entity, id, params) {
+    if (env.openIn === 'new' && !params) return open(pageUrl(env, 'entityrecord', entity, id));
     const nav = env.xrm.Navigation;
     if (nav && nav.openForm) await settle(nav.openForm({ entityName: entity, entityId: id || undefined }, params));
     else env.xrm.Utility.openEntityForm(entity, id || undefined, params);
@@ -544,8 +573,18 @@
     },
 
     // Navigate
-    'open-by-id'(env, args) {
+    async 'open-by-id'(env, args) {
       const entity = entityArg(args);
+      if (args.mode === 'random') {
+        const id = await randomId(env, entity);
+        return { ...(await openRecord(env, entity, id)), toast: `Opened a random ${entity}: ${id}` };
+      }
+      if (args.mode === 'many') {
+        const ids = parseIds(args.ids);
+        if (ids.length === 1) return openRecord(env, entity, ids[0]);
+        if (ids.length > MAX_OPEN) throw new Error(`That is ${ids.length} records: open at most ${MAX_OPEN} at once.`);
+        return { open: ids.map((id) => pageUrl(env, 'entityrecord', entity, id)), toast: `Opening ${ids.length} records in new tabs` };
+      }
       const id = cleanId(String(args.id || '').trim());
       if (!GUID.test(id)) throw new Error('That is not a valid record ID (GUID).');
       return openRecord(env, entity, id);
@@ -687,6 +726,7 @@
       if (!handler) throw new Error(`Unknown command: ${id}`);
       const env = getEnv();
       if (!env) throw new Error('This page is not a Dynamics 365 / Power Apps model-driven app.');
+      env.openIn = opts && opts.openIn === 'new' ? 'new' : 'current';
       return { ok: true, ...((await handler(env, args || {})) || {}) };
     } catch (err) {
       return { ok: false, error: String((err && err.message) || err) };

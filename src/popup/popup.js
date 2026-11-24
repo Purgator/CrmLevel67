@@ -16,6 +16,7 @@ const state = {
   ctx: null, // null while connecting
   imp: { user: null, permitted: false, check: null }, // check: what the server says about the impersonation
   keepOpen: true, // stay open after a command runs
+  openIn: 'current', // 'current' | 'new': where records and lists open
   favs: [],
   recents: [],
   theme: 'auto',
@@ -275,13 +276,14 @@ async function execute(cmd, args, invert) {
   await save({ recents: state.recents });
   document.body.classList.add('busy');
   try {
-    const res = await call('run', cmd.id, args || {}, { theme: state.theme });
+    const res = await call('run', cmd.id, args || {}, { theme: state.theme, openIn: state.openIn });
     if (!res) throw new Error('The page did not answer. Reload it and try again.');
     if (!res.ok) throw new Error(res.error);
     // A page that reloads takes the palette's view of it along: always close then.
     const keep = state.keepOpen !== !!invert && !res.navigate;
     if (res.copy) await copyText(res.copy);
-    if (res.open) await api.tabs.create({ url: res.open, index: state.tab.index + 1, active: !keep });
+    const urls = [].concat(res.open || []);
+    for (const [i, url] of urls.entries()) await api.tabs.create({ url, index: state.tab.index + 1 + i, active: !keep && i === 0 });
     if (!keep) {
       if (res.toast) await call('notify', res.toast, res.kind || 'ok', state.theme);
       window.close();
@@ -366,8 +368,11 @@ function entityField(field, input, wrap) {
 function showInput(cmd) {
   const inputs = {};
   const wraps = {};
+  let mode = cmd.modes ? cmd.modes[0] : null;
   const fields = cmd.input.map((f) => {
-    const input = h('input', { type: 'text', id: `f-${f.name}`, placeholder: f.placeholder, autocomplete: 'off', spellcheck: 'false' });
+    const input = f.type === 'ids'
+      ? h('textarea', { id: `f-${f.name}`, rows: 5, placeholder: f.placeholder, autocomplete: 'off', spellcheck: 'false' })
+      : h('input', { type: 'text', id: `f-${f.name}`, placeholder: f.placeholder, autocomplete: 'off', spellcheck: 'false' });
     const wrap = h('div', { class: 'field' }, h('label', { for: `f-${f.name}` }, f.label), input);
     inputs[f.name] = input;
     wraps[f.name] = wrap;
@@ -389,16 +394,26 @@ function showInput(cmd) {
     }
     return wrap;
   });
-  const submit = h('button', { class: 'primary', type: 'submit' }, cmd.title);
-  const form = h('form', { class: 'pane', novalidate: true }, paneHead(cmd), h('p', null, cmd.desc), fields, submit);
+  const submit = h('button', { class: 'primary', type: 'submit' }, mode ? mode.submit : cmd.title);
+  const active = () => cmd.input.filter((f) => !mode || mode.fields.includes(f.name));
+  // The mode switch only shows the fields of the chosen mode.
+  const applyMode = () => {
+    for (const f of cmd.input) wraps[f.name].hidden = !active().includes(f);
+    submit.textContent = mode.submit;
+    const first = active().find((f) => !inputs[f.name].value) || active()[0];
+    inputs[first.name].focus();
+  };
+  const switcher = mode && segmented('Open by', cmd.modes.map((m) => [m.id, m.label]), mode.id, (id) => { mode = cmd.modes.find((m) => m.id === id); applyMode(); });
+  const form = h('form', { class: 'pane', novalidate: true }, paneHead(cmd), h('p', null, cmd.desc), switcher && h('div', { class: 'modes' }, switcher), fields, submit);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const args = {};
+    const args = mode ? { mode: mode.id } : {};
     let bad = null;
-    for (const f of cmd.input) {
+    for (const f of active()) {
       const value = inputs[f.name].value.trim();
       const error = !value ? 'Required.'
         : f.type === 'guid' && !GUID.test(value) ? 'That does not look like a GUID.'
+        : f.type === 'ids' && value.split(/[\s,;]+/).filter((t) => !GUID.test(t)).length ? 'Every entry must be a GUID.'
         : f.type === 'entity' && !/^[a-z][a-z0-9_]*$/i.test(value) ? 'Use the logical name, like "account".' : '';
       wraps[f.name].classList.toggle('bad', !!error);
       wraps[f.name].querySelector('.error')?.remove();
@@ -414,7 +429,8 @@ function showInput(cmd) {
     submit.disabled = false;
   });
   $('view').replaceChildren(form);
-  const first = cmd.input.find((f) => !inputs[f.name].value) || cmd.input[0];
+  if (mode) for (const f of cmd.input) wraps[f.name].hidden = !active().includes(f);
+  const first = active().find((f) => !inputs[f.name].value) || active()[0];
   inputs[first.name].focus();
   inputs[first.name].select();
 }
@@ -518,6 +534,9 @@ function showSettings() {
       h('div', null, h('b', null, 'After running a command'), h('small', null, 'Hold Shift while you click or press Enter to do the opposite once. Commands that reload the page always close the menu.')),
       segmented('After running a command', [[true, 'Keep open'], [false, 'Close']], state.keepOpen, (value) => { state.keepOpen = value; save({ keepOpen: value }); })),
     h('div', { class: 'setting' },
+      h('div', null, h('b', null, 'Open records and lists'), h('small', null, 'Where "Open record by ID", "New record", "Open table list", "My user record" and the admin lists load their page.')),
+      segmented('Open records and lists', [['current', 'Current tab'], ['new', 'New tab']], state.openIn, (value) => { state.openIn = value; save({ openIn: value }); })),
+    h('div', { class: 'setting' },
       h('div', null, h('b', null, 'Theme'), h('small', null, 'Auto follows your system. Applies to this menu and to the panels shown in the page.')),
       segmented('Theme', THEMES.map((t) => [t, t[0].toUpperCase() + t.slice(1)]), state.theme, (value) => { state.theme = value; save({ theme: value }); applyTheme(); })),
     h('div', { class: 'setting' },
@@ -553,8 +572,9 @@ document.addEventListener('keydown', (e) => {
 
 // ── Boot ──────────────────────────────────────────────────────────────────
 async function boot() {
-  const stored = await api.storage.local.get(['favs', 'recents', 'theme', 'keepOpen']).catch(() => ({}));
+  const stored = await api.storage.local.get(['favs', 'recents', 'theme', 'keepOpen', 'openIn']).catch(() => ({}));
   state.keepOpen = stored.keepOpen !== false;
+  state.openIn = stored.openIn === 'new' ? 'new' : 'current';
   state.favs = Array.isArray(stored.favs) ? stored.favs.filter((id) => byId.has(id)) : [];
   state.recents = Array.isArray(stored.recents) ? stored.recents.filter((id) => byId.has(id)) : [];
   state.theme = THEMES.includes(stored.theme) ? stored.theme : 'auto';

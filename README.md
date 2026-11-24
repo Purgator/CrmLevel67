@@ -126,7 +126,7 @@ Firefox 140 or newer. Download **`Level67-firefox.zip`** from the [latest releas
 
 In the side panel: type to filter, click a cell to copy it, `Esc` to close.
 
-**Settings.** The gear icon opens the settings: what the menu does after a command (keep open or close), the theme, and a button to clear favourites and recents.
+**Settings.** The gear icon opens the settings: what the menu does after a command (keep open or close), whether records and lists open in the current or a new tab, the theme, and a button to clear favourites and recents.
 
 ![Settings panel](docs/settings.png)
 
