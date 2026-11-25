@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.0
 
 - "Open record by ID" can open a random record of the table, or a list of IDs (commas, semicolons or one per line, up to 20 at once, each in a new tab).
 - New setting: open records and lists in the current tab or in a new tab.

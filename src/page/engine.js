@@ -9,7 +9,7 @@
 // Every result is plain JSON so it can cross the extension boundary.
 (() => {
   'use strict';
-  const VERSION = '1.0.1';
+  const VERSION = '1.1.0';
   if (window.__level67 && window.__level67.version === VERSION) return;
 
   const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
